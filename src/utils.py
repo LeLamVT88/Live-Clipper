@@ -6,6 +6,13 @@ from typing import Union
 
 
 PathLike = Union[str, Path]
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def resolve_project_path(path: object) -> Path:
+    """Resolve a project-relative path without changing absolute paths."""
+    resolved_path = Path(str(path))
+    return resolved_path if resolved_path.is_absolute() else PROJECT_ROOT / resolved_path
 
 
 def timestamp_to_seconds(timestamp: object) -> float:
@@ -58,6 +65,49 @@ def timestamp_to_seconds(timestamp: object) -> float:
         )
 
     return hours * 3600 + minutes * 60 + seconds
+
+
+def timestamp_range_to_seconds(timestamp_range: object) -> tuple[float, float]:
+    """Convert a START-END range, including compact MM.SS endpoints, to seconds."""
+    text = str(timestamp_range).strip()
+    if not text or "-" not in text:
+        raise ValueError(
+            f"Invalid time range '{timestamp_range}'. "
+            "Expected START-END, for example 1.00-2.00."
+        )
+
+    start_text, end_text = (part.strip() for part in text.split("-", maxsplit=1))
+    if not start_text or not end_text:
+        raise ValueError(
+            f"Invalid time range '{timestamp_range}'. Both start and end are required."
+        )
+
+    def parse_endpoint(endpoint: str) -> float:
+        compact_parts = endpoint.split(".")
+        if (
+            ":" not in endpoint
+            and len(compact_parts) == 2
+            and compact_parts[0].isdigit()
+            and len(compact_parts[1]) == 2
+            and compact_parts[1].isdigit()
+        ):
+            minutes = int(compact_parts[0])
+            seconds = int(compact_parts[1])
+            if seconds >= 60:
+                raise ValueError(
+                    f"Invalid compact timestamp '{endpoint}'. Seconds must be 00-59."
+                )
+            return float(minutes * 60 + seconds)
+        return timestamp_to_seconds(endpoint)
+
+    start_seconds = parse_endpoint(start_text)
+    end_seconds = parse_endpoint(end_text)
+    if end_seconds <= start_seconds:
+        raise ValueError(
+            f"Invalid time range '{timestamp_range}'. End must be greater than start."
+        )
+
+    return start_seconds, end_seconds
 
 
 def seconds_to_timestamp(seconds: float) -> str:

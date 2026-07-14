@@ -20,6 +20,7 @@ DEFAULT_INPUT_DIR = PROJECT_ROOT / "data" / "raw_videos"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data" / "frames"
 DEFAULT_PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 DEFAULT_METADATA_CSV = PROJECT_ROOT / "data" / "processed" / "extracted_frames.csv"
+DEFAULT_DURATION = "00:10:00"
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm"}
 
 
@@ -54,12 +55,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--duration",
         default=None,
-        help="Duration to extract, e.g. 3600 or 01:00:00. Cannot be used with --end.",
+        help=(
+            f"Duration to extract (default: {DEFAULT_DURATION}), e.g. 600 or "
+            "00:10:00. Cannot be used with --end."
+        ),
     )
     parser.add_argument(
         "--end",
         default=None,
-        help="End timestamp to extract until, e.g. 01:00:00. Cannot be used with --duration.",
+        help="End timestamp to extract until, e.g. 00:10:00. Cannot be used with --duration.",
     )
     return parser.parse_args()
 
@@ -155,6 +159,11 @@ def extract_video_frames(
                 f"End time must be after start time for video: {video_path.name}"
             )
 
+        # Re-extracting a shorter range must not leave stale frames from an older run.
+        for old_frame_path in video_output_dir.glob("frame_*.jpg"):
+            if old_frame_path.is_file():
+                old_frame_path.unlink()
+
         step_seconds = 1.0 / target_fps
         timestamp_seconds = start_seconds
         frame_index = 1
@@ -222,8 +231,13 @@ def main() -> int:
 
     try:
         start_seconds = timestamp_to_seconds(args.start)
+        duration_value = (
+            args.duration
+            if args.duration is not None
+            else (None if args.end is not None else DEFAULT_DURATION)
+        )
         duration_seconds = (
-            timestamp_to_seconds(args.duration) if args.duration is not None else None
+            timestamp_to_seconds(duration_value) if duration_value is not None else None
         )
         end_seconds = timestamp_to_seconds(args.end) if args.end is not None else None
     except ValueError as exc:

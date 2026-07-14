@@ -8,14 +8,20 @@ from pathlib import Path
 
 import pandas as pd
 
-from utils import ensure_dir, get_video_name_without_ext, seconds_to_timestamp, timestamp_to_seconds
+from utils import (
+    ensure_dir,
+    get_video_name_without_ext,
+    seconds_to_timestamp,
+    timestamp_range_to_seconds,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_GROUND_TRUTH_CSV = PROJECT_ROOT / "data" / "ground_truth.csv"
 DEFAULT_INPUT_DIR = PROJECT_ROOT / "data" / "raw_videos"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "clips"
-GROUND_TRUTH_COLUMNS = {"video", "start", "end"}
+TEAM_COLUMNS = ("Đội 1", "Đội 2")
+GROUND_TRUTH_COLUMNS = {"video", *TEAM_COLUMNS}
 
 
 class CutClipError(Exception):
@@ -53,6 +59,34 @@ def load_ground_truth(csv_path: Path) -> pd.DataFrame:
 
     ground_truth = pd.read_csv(csv_path)
     validate_columns(ground_truth, GROUND_TRUTH_COLUMNS, csv_path)
+
+    seen_videos: set[str] = set()
+    for row_index, row in ground_truth.iterrows():
+        row_number = row_index + 2
+        video_name = str(row["video"]).strip()
+        if not video_name:
+            raise CutClipError(f"Missing video name at ground truth row {row_number}.")
+        if video_name in seen_videos:
+            raise CutClipError(
+                f"Duplicate video at ground truth row {row_number}: {video_name}"
+            )
+
+        ranges: list[tuple[float, float]] = []
+        for team_column in TEAM_COLUMNS:
+            try:
+                ranges.append(timestamp_range_to_seconds(row[team_column]))
+            except ValueError as exc:
+                raise CutClipError(
+                    f"Invalid {team_column} at ground truth row {row_number}: {exc}"
+                ) from exc
+
+        if ranges[0][1] > ranges[1][0]:
+            raise CutClipError(
+                f"Overlapping team ranges at ground truth row {row_number}: "
+                "Đội 1 must end before Đội 2 starts."
+            )
+        seen_videos.add(video_name)
+
     return ground_truth
 
 
@@ -84,9 +118,11 @@ def build_ffmpeg_command(
     return command
 
 
-def cut_row(
+def cut_team_range(
     row: pd.Series,
     row_number: int,
+    team_column: str,
+    team_number: int,
     input_dir: Path,
     output_dir: Path,
     reencode: bool,
@@ -100,22 +136,17 @@ def cut_row(
         raise CutClipError(f"Video file does not exist: {video_path}")
 
     try:
-        start_seconds = timestamp_to_seconds(row["start"])
-        end_seconds = timestamp_to_seconds(row["end"])
+        start_seconds, end_seconds = timestamp_range_to_seconds(row[team_column])
     except ValueError as exc:
-        raise CutClipError(f"Invalid timestamp at ground truth row {row_number}: {exc}") from exc
-
-    if end_seconds <= start_seconds:
         raise CutClipError(
-            f"Invalid time range at ground truth row {row_number}: "
-            "end must be greater than start."
-        )
+            f"Invalid {team_column} at ground truth row {row_number}: {exc}"
+        ) from exc
 
     start_timestamp = seconds_to_timestamp(start_seconds)
     end_timestamp = seconds_to_timestamp(end_seconds)
     video_stem = get_video_name_without_ext(video_name)
     output_name = (
-        f"{video_stem}_lineup_{row_number - 1:03d}_"
+        f"{video_stem}_lineup_team_{team_number}_"
         f"{safe_timestamp_for_filename(start_timestamp)}_"
         f"{safe_timestamp_for_filename(end_timestamp)}{video_path.suffix}"
     )
@@ -158,18 +189,21 @@ def main() -> int:
 
         for row_index, row in ground_truth.iterrows():
             row_number = row_index + 2
-            try:
-                output_path = cut_row(
-                    row=row,
-                    row_number=row_number,
-                    input_dir=args.input_dir,
-                    output_dir=args.output_dir,
-                    reencode=args.reencode,
-                )
-                output_paths.append(output_path)
-                print(f"Saved clip: {output_path}")
-            except CutClipError as exc:
-                errors.append(str(exc))
+            for team_number, team_column in enumerate(TEAM_COLUMNS, start=1):
+                try:
+                    output_path = cut_team_range(
+                        row=row,
+                        row_number=row_number,
+                        team_column=team_column,
+                        team_number=team_number,
+                        input_dir=args.input_dir,
+                        output_dir=args.output_dir,
+                        reencode=args.reencode,
+                    )
+                    output_paths.append(output_path)
+                    print(f"Saved clip: {output_path}")
+                except CutClipError as exc:
+                    errors.append(str(exc))
 
         if errors:
             print("\nSome clips could not be created:", file=sys.stderr)

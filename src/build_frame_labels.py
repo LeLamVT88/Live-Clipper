@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from utils import ensure_dir, timestamp_to_seconds
+from utils import ensure_dir, timestamp_range_to_seconds
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -15,7 +15,8 @@ DEFAULT_GROUND_TRUTH_CSV = PROJECT_ROOT / "data" / "ground_truth.csv"
 DEFAULT_PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 DEFAULT_FRAME_METADATA_CSV = PROJECT_ROOT / "data" / "processed" / "extracted_frames.csv"
 DEFAULT_OUTPUT_CSV = PROJECT_ROOT / "data" / "processed" / "frame_labels.csv"
-GROUND_TRUTH_COLUMNS = {"video", "start", "end"}
+TEAM_COLUMNS = ("Đội 1", "Đội 2")
+GROUND_TRUTH_COLUMNS = {"video", *TEAM_COLUMNS}
 FRAME_METADATA_COLUMNS = {"video", "frame_path", "timestamp", "timestamp_seconds"}
 
 
@@ -68,22 +69,27 @@ def load_ground_truth(csv_path: Path) -> dict[str, list[tuple[float, float]]]:
         video = normalize_video_name(row["video"])
         if not video:
             raise LabelBuildError(f"Missing video name at ground truth row {row_number + 2}.")
-
-        try:
-            start_seconds = timestamp_to_seconds(row["start"])
-            end_seconds = timestamp_to_seconds(row["end"])
-        except ValueError as exc:
+        if video in ranges_by_video:
             raise LabelBuildError(
-                f"Invalid timestamp at ground truth row {row_number + 2}: {exc}"
-            ) from exc
-
-        if end_seconds <= start_seconds:
-            raise LabelBuildError(
-                f"Invalid time range at ground truth row {row_number + 2}: "
-                "end must be greater than start."
+                f"Duplicate video at ground truth row {row_number + 2}: {video}"
             )
 
-        ranges_by_video.setdefault(video, []).append((start_seconds, end_seconds))
+        lineup_ranges: list[tuple[float, float]] = []
+        for team_column in TEAM_COLUMNS:
+            try:
+                lineup_ranges.append(timestamp_range_to_seconds(row[team_column]))
+            except ValueError as exc:
+                raise LabelBuildError(
+                    f"Invalid {team_column} at ground truth row {row_number + 2}: {exc}"
+                ) from exc
+
+        if lineup_ranges[0][1] > lineup_ranges[1][0]:
+            raise LabelBuildError(
+                f"Overlapping team ranges at ground truth row {row_number + 2}: "
+                "Đội 1 must end before Đội 2 starts."
+            )
+
+        ranges_by_video[video] = lineup_ranges
 
     return ranges_by_video
 
@@ -153,9 +159,10 @@ def build_labels(
         timestamp_seconds = float(row["timestamp_seconds"])
         lineup_ranges = ranges_by_video.get(video, [])
 
-        # Tính cả frame đúng tại start/end là frame lineup.
+        # Dùng khoảng [start, end): frame tại end thuộc đoạn kế tiếp.
+        # Quy ước này cho phép tách hai đoạn lineup bằng một khoảng label 0.
         label = int(
-            any(start <= timestamp_seconds <= end for start, end in lineup_ranges)
+            any(start <= timestamp_seconds < end for start, end in lineup_ranges)
         )
         labels.append(label)
 

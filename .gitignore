@@ -14,9 +14,6 @@ data/raw_videos/*
 data/frames/*
 !data/frames/.gitkeep
 
-data/crops/*
-!data/crops/.gitkeep
-
 data/processed/*
 !data/processed/.gitkeep
 
