@@ -13,7 +13,6 @@ live-clipper/
 │   ├── processed/         # metadata và dataset CSV
 │   └── ground_truth.csv   # khoảng lineup của Đội 1 và Đội 2
 ├── outputs/
-│   ├── clips/             # clip ground truth để kiểm tra
 │   └── predictions/       # checkpoint, metrics và kết quả dự đoán
 ├── src/
 │   ├── utils.py
@@ -23,7 +22,7 @@ live-clipper/
 │   ├── train_mobilenet.py
 │   ├── predict_mobilenet.py
 │   ├── aggregate.py
-│   └── cut_clip.py
+│   └── evaluate_segments.py
 ├── .gitignore
 ├── README.md
 └── requirements.txt
@@ -37,12 +36,6 @@ Tạo môi trường Python và cài package:
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-```
-
-`cut_clip.py` cần FFmpeg có sẵn trong `PATH`:
-
-```bash
-ffmpeg -version
 ```
 
 ## Chuẩn bị ground truth
@@ -285,21 +278,6 @@ python src/evaluate_segments.py \
 Mốc bỏ đoạn ngắn `8` giây được chọn từ validation hiện tại. Cần hiệu chỉnh lại
 trên validation nếu dataset thay đổi, rồi mới dùng test để báo cáo kết quả cuối
 cùng.
-
-## Kiểm tra ground truth bằng clip
-
-Cắt hai đoạn lineup thật của mỗi video:
-
-```bash
-python src/cut_clip.py
-```
-
-Clip được lưu trong `outputs/clips/`. Mặc định FFmpeg dùng stream copy để cắt
-nhanh. Dùng re-encode nếu cần điểm cắt chính xác hơn:
-
-```bash
-python src/cut_clip.py --reencode
-```
 
 ## Ghi chú
 

@@ -17,11 +17,5 @@ data/frames/*
 data/processed/*
 !data/processed/.gitkeep
 
-outputs/clips/*
-!outputs/clips/.gitkeep
-
 outputs/predictions/*
 !outputs/predictions/.gitkeep
-
-outputs/logs/*
-!outputs/logs/.gitkeep
