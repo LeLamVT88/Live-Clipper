@@ -6,7 +6,10 @@ __pycache__/
 .ipynb_checkpoints/
 
 .venv/
+.venv-ocr/
 venv/
+
+.cache/paddlex/
 
 data/raw_videos/*
 !data/raw_videos/.gitkeep
@@ -14,8 +17,16 @@ data/raw_videos/*
 data/frames/*
 !data/frames/.gitkeep
 
+data/ocr_frames/*
+!data/ocr_frames/.gitkeep
+
+data/ocr_samples/
+
 data/processed/*
 !data/processed/.gitkeep
 
 outputs/predictions/*
 !outputs/predictions/.gitkeep
+
+outputs/clips/*
+!outputs/clips/.gitkeep

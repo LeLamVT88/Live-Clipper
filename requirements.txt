@@ -1,6 +1,10 @@
+--extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cpu/
+
 numpy>=2.0.0
 opencv-python>=4.8.0
 pandas>=2.0.0
 pillow>=12.0.0
 torch>=2.13.0
 torchvision>=0.28.0
+paddlepaddle==3.3.0
+paddleocr==3.7.0

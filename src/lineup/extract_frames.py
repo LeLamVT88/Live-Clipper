@@ -15,7 +15,7 @@ from utils import (
 )
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_INPUT_DIR = PROJECT_ROOT / "data" / "raw_videos"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data" / "frames"
 DEFAULT_PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
@@ -32,7 +32,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Extract fixed-FPS frames from videos in data/raw_videos/."
     )
-    parser.add_argument("--fps", type=float, default=1.0, help="Frames per second to extract.")
+    parser.add_argument(
+        "--fps",
+        type=float,
+        default=0.5,
+        help="Frames per second to extract (default: 0.5 for lineup detection).",
+    )
     parser.add_argument("--input-dir", type=Path, default=DEFAULT_INPUT_DIR)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)

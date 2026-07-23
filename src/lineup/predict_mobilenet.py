@@ -78,7 +78,7 @@ def load_frames(csv_path: Path) -> pd.DataFrame:
     if not csv_path.exists():
         raise MobileNetPredictionError(
             f"Input CSV does not exist: {csv_path}. "
-            "Run python src/extract_frames.py first, or pass --input-csv."
+            "Run python src/lineup/extract_frames.py first, or pass --input-csv."
         )
 
     frames = pd.read_csv(csv_path)
@@ -103,7 +103,7 @@ def load_checkpoint(checkpoint_path: Path) -> dict[str, object]:
     if not checkpoint_path.exists():
         raise MobileNetPredictionError(
             f"Model checkpoint does not exist: {checkpoint_path}. "
-            "Run python src/train_mobilenet.py first."
+            "Run python src/lineup/train_mobilenet.py first."
         )
 
     checkpoint = torch.load(

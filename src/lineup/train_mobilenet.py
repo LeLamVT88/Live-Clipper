@@ -106,7 +106,7 @@ def load_dataset(csv_path: Path) -> pd.DataFrame:
     if not csv_path.exists():
         raise MobileNetTrainingError(
             f"Dataset CSV does not exist: {csv_path}. "
-            "Run python src/build_dataset_index.py first."
+            "Run python src/lineup/build_dataset_index.py first."
         )
 
     dataset = pd.read_csv(csv_path)

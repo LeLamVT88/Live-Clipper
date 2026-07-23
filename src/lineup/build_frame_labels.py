@@ -10,7 +10,7 @@ import pandas as pd
 from utils import ensure_dir, timestamp_range_to_seconds
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_GROUND_TRUTH_CSV = PROJECT_ROOT / "data" / "ground_truth.csv"
 DEFAULT_PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 DEFAULT_FRAME_METADATA_CSV = PROJECT_ROOT / "data" / "processed" / "extracted_frames.csv"
@@ -98,7 +98,7 @@ def load_frame_metadata(csv_path: Path) -> pd.DataFrame:
     if not csv_path.exists():
         raise LabelBuildError(
             f"Frame metadata CSV does not exist: {csv_path}. "
-            "Run python src/extract_frames.py --fps 1 first."
+            "Run python src/lineup/extract_frames.py --fps 0.5 first."
         )
 
     metadata = pd.read_csv(csv_path)

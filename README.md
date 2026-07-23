@@ -1,7 +1,8 @@
 # Live Clipper - Football Lineup Detection
 
-Project dùng MobileNetV3-Small để phát hiện các frame hiển thị đội hình trong video
-bóng đá, sau đó gom các frame được dự đoán thành đoạn thời gian lineup.
+Project dùng MobileNetV3-Small ở `0,5 FPS` để phát hiện đoạn đội hình trong
+video bóng đá. Sau đó project chỉ tách các đoạn lineup ở `2 FPS` và dùng
+PaddleOCR để đọc tên, số áo.
 
 ## Cấu trúc thư mục
 
@@ -9,20 +10,29 @@ bóng đá, sau đó gom các frame được dự đoán thành đoạn thời g
 live-clipper/
 ├── data/
 │   ├── raw_videos/        # video gốc
-│   ├── frames/            # frame tách từ video
+│   ├── frames/            # frame 0,5 FPS cho MobileNet
+│   ├── ocr_frames/        # frame 2 FPS chỉ trong các đoạn lineup
+│   ├── ocr_samples/       # frame và ground truth để phát triển OCR
 │   ├── processed/         # metadata và dataset CSV
 │   └── ground_truth.csv   # khoảng lineup của Đội 1 và Đội 2
 ├── outputs/
-│   └── predictions/       # checkpoint, metrics và kết quả dự đoán
+│   ├── predictions/       # checkpoint, metrics và kết quả dự đoán
+│   └── clips/             # clip lineup được cắt từ video gốc
 ├── src/
-│   ├── utils.py
-│   ├── extract_frames.py
-│   ├── build_frame_labels.py
-│   ├── build_dataset_index.py
-│   ├── train_mobilenet.py
-│   ├── predict_mobilenet.py
-│   ├── aggregate.py
-│   └── evaluate_segments.py
+│   ├── lineup/            # phát hiện và xuất clip lineup
+│   │   ├── utils.py
+│   │   ├── extract_frames.py
+│   │   ├── build_frame_labels.py
+│   │   ├── build_dataset_index.py
+│   │   ├── train_mobilenet.py
+│   │   ├── predict_mobilenet.py
+│   │   ├── aggregate.py
+│   │   ├── export_clips.py
+│   │   └── evaluate_segments.py
+│   └── ocr/               # tách frame lineup và đọc tên, số áo
+│       ├── ocr_smoke_test.py
+│       ├── run_lineup_ocr.py
+│       └── resolve_lineup.py
 ├── .gitignore
 ├── README.md
 └── requirements.txt
@@ -30,13 +40,25 @@ live-clipper/
 
 ## Cài đặt
 
-Tạo môi trường Python và cài package:
+PaddlePaddle trên macOS hiện cần Python 3.9-3.13, vì vậy project dùng chung
+Python 3.11 cho cả MobileNet và OCR:
 
 ```bash
-python -m venv .venv
+python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
+
+Chạy kiểm tra trên frame lineup mẫu:
+
+```bash
+.venv/bin/python src/ocr/ocr_smoke_test.py
+```
+
+Script dùng hai model CPU nhẹ `PP-OCRv6_small_det` và
+`PP-OCRv6_small_rec`. Lần chạy đầu cần mạng để tải model vào
+`.cache/paddlex/`; các lần sau dùng cache nội bộ và có thể chạy offline. Việc
+tải model không phải là lấy roster hay thông tin cầu thủ từ API.
 
 ## Chuẩn bị ground truth
 
@@ -63,23 +85,18 @@ nhận. Khoảng giữa `Đội 1` và `Đội 2` tự nhận `label = 0`.
 
 ### 1. Tách frame
 
-Mặc định script lấy 1 frame/giây trong 10 phút đầu của tất cả video:
+Mặc định script lấy `0,5 frame/giây`, tức một frame mỗi hai giây, trong 10
+phút đầu của tất cả video:
 
 ```bash
-python src/extract_frames.py --fps 1
-```
-
-Để lấy 2 giây một frame:
-
-```bash
-python src/extract_frames.py --fps 0.5
+python src/lineup/extract_frames.py
 ```
 
 Có thể chọn một hoặc nhiều video cụ thể:
 
 ```bash
-python src/extract_frames.py --video "match1.mp4" --fps 1
-python src/extract_frames.py --video "match1.mp4" --video "match2.mp4" --fps 1
+python src/lineup/extract_frames.py --video "match1.mp4"
+python src/lineup/extract_frames.py --video "match1.mp4" --video "match2.mp4"
 ```
 
 Mặc định `--duration` là `00:10:00`. Có thể truyền `--duration` hoặc `--end`
@@ -96,7 +113,7 @@ data/processed/extracted_frames.csv
 ### 2. Gán nhãn frame
 
 ```bash
-python src/build_frame_labels.py --only-ground-truth-videos
+python src/lineup/build_frame_labels.py --only-ground-truth-videos
 ```
 
 Kết quả riêng từng video:
@@ -120,7 +137,7 @@ ground truth không bị coi nhầm là toàn bộ `label = 0`.
 ### 3. Tạo dataset train/validation/test
 
 ```bash
-python src/build_dataset_index.py --verify-files
+python src/lineup/build_dataset_index.py --verify-files
 ```
 
 Kết quả:
@@ -134,7 +151,7 @@ chỉ xuất hiện trong đúng một tập. Mặc định validation và test 
 15% số video. Có thể chỉ định video giữ lại:
 
 ```bash
-python src/build_dataset_index.py \
+python src/lineup/build_dataset_index.py \
   --val-video "match_val" \
   --test-video "match_test" \
   --verify-files
@@ -145,7 +162,7 @@ Giá trị truyền vào là `video_id`, tức tên thư mục con trong `data/p
 ### 4. Train MobileNetV3-Small
 
 ```bash
-python src/train_mobilenet.py
+python src/lineup/train_mobilenet.py
 ```
 
 Model sử dụng pretrained ImageNet và train theo hai giai đoạn:
@@ -168,9 +185,9 @@ outputs/predictions/mobilenet_v3_small_predictions.csv
 Có thể chọn thiết bị thủ công:
 
 ```bash
-python src/train_mobilenet.py --device mps
-python src/train_mobilenet.py --device cuda
-python src/train_mobilenet.py --device cpu
+python src/lineup/train_mobilenet.py --device mps
+python src/lineup/train_mobilenet.py --device cuda
+python src/lineup/train_mobilenet.py --device cpu
 ```
 
 Mặc định `--device auto` ưu tiên CUDA, sau đó MPS, cuối cùng CPU.
@@ -182,7 +199,7 @@ Mặc định `--device auto` ưu tiên CUDA, sau đó MPS, cuối cùng CPU.
 Đặt video mới vào `data/raw_videos/`, sau đó chạy:
 
 ```bash
-python src/extract_frames.py --video "new_match.mp4" --fps 1
+python src/lineup/extract_frames.py --video "new_match.mp4"
 ```
 
 Lần extract này cập nhật `data/processed/extracted_frames.csv`, là input mặc
@@ -191,7 +208,7 @@ Lần extract này cập nhật `data/processed/extracted_frames.csv`, là input
 ### 2. Chạy MobileNetV3 inference
 
 ```bash
-python src/predict_mobilenet.py
+python src/lineup/predict_mobilenet.py
 ```
 
 Script tự đọc từ checkpoint:
@@ -219,7 +236,7 @@ pred_label        # nhãn cuối dùng threshold đã chọn trên validation
 Có thể truyền input hoặc output khác:
 
 ```bash
-python src/predict_mobilenet.py \
+python src/lineup/predict_mobilenet.py \
   --input-csv data/processed/new_match/extracted_frames.csv \
   --output-csv outputs/predictions/new_match_predictions.csv
 ```
@@ -227,7 +244,7 @@ python src/predict_mobilenet.py \
 ### 3. Gom prediction thành đoạn lineup
 
 ```bash
-python src/aggregate.py \
+python src/lineup/aggregate.py \
   --merge-gap-seconds 6 \
   --min-duration-seconds 8
 ```
@@ -242,16 +259,126 @@ outputs/predictions/lineup_segments.csv
 Nếu muốn thử threshold khác, script sẽ ưu tiên `smoothed_score`:
 
 ```bash
-python src/aggregate.py --threshold 0.6
+python src/lineup/aggregate.py --threshold 0.6
 ```
 
-### 4. Đánh giá theo đoạn trên tập test
+### 4. Tách đoạn lineup ở 2 FPS và chạy OCR
+
+Script đọc `lineup_segments.csv`, quay lại video gốc và chỉ tách frame trong
+các khoảng lineup. MobileNet vẫn chạy ở `0,5 FPS`; `2 FPS` chỉ dùng cho OCR:
+
+```bash
+.venv/bin/python src/ocr/run_lineup_ocr.py
+```
+
+Có thể chọn file segment cụ thể:
+
+```bash
+.venv/bin/python src/ocr/run_lineup_ocr.py \
+  --segments-csv outputs/predictions/premier_match_01_segments.csv
+```
+
+Mặc định script dùng `2 FPS`, model CPU nhẹ và ngưỡng OCR `0.80`. Kết quả:
+
+```text
+data/ocr_frames/<video>/segment_01/*.jpg
+outputs/predictions/ocr_frames.csv
+outputs/predictions/ocr_raw_detections.csv
+```
+
+`ocr_frames.csv` chứa timestamp của từng frame. `ocr_raw_detections.csv` chứa
+text, confidence, bounding box và tọa độ tâm chuẩn hóa để bước sau ghép tên với
+số áo xuyên nhiều frame.
+
+Để chỉ kiểm tra việc tách frame mà chưa chạy OCR:
+
+```bash
+.venv/bin/python src/ocr/run_lineup_ocr.py --extract-only
+```
+
+### 5. Gộp đa frame và ghép tên với số áo
+
+Sau khi có `ocr_raw_detections.csv`, chạy:
+
+```bash
+.venv/bin/python src/ocr/resolve_lineup.py
+```
+
+Resolver không dùng roster hoặc API. Script tự:
+
+1. Đọc dòng dạng danh sách, kể cả khi OCR gộp thành
+   `99 DONNARUMMA`.
+2. Tìm các frame hiển thị sơ đồ đội hình dựa trên số lượng và vị trí số áo.
+3. Gom số áo và tên theo cùng một slot xuyên nhiều frame.
+4. Nếu số áo quá nhỏ hoặc bị dính theo cột, chỉ OCR lại các ô số trên tối đa
+   ba frame đại diện. Không OCR lại toàn bộ clip.
+5. Loại vùng danh sách dự bị để số áo dự bị không bị ghép nhầm vào đội hình.
+6. Tách nhiều đội hình nếu hai đội nằm trong cùng một segment.
+7. Dùng đồng thuận đa frame để sửa biến thể OCR và ghép tên đầy đủ.
+
+Kết quả:
+
+```text
+outputs/predictions/resolved_lineups.csv
+outputs/predictions/resolved_lineups_diagnostics.csv
+```
+
+Các cột chính:
+
+```csv
+lineup_index,resolution_method,shirt_number,formation_label,player_name,pair_confidence
+1,formation,1,Alisson,Alisson Becker,0.997292
+1,formation,17,Jones,Curtis Jones,0.999953
+```
+
+`resolution_method` cho biết kết quả đến từ `table`, `table+local_ocr`,
+`formation` hay `formation+local_ocr`. File diagnostics có một dòng cho mỗi
+segment với trạng thái `resolved`/`unresolved` và nguyên nhân. Resolver chỉ
+xuất lineup khi tìm đủ số cầu thủ yêu cầu; nó không tự đoán cho đủ 11.
+
+Nếu chỉ muốn kiểm tra kết quả OCR toàn frame và tắt lượt OCR cục bộ:
+
+```bash
+.venv/bin/python src/ocr/resolve_lineup.py --disable-local-ocr
+```
+
+Lượt OCR cục bộ là cần thiết với các kiểu đồ họa có số rất nhỏ trên áo hoặc
+cột số sát nhau. Nó vẫn chạy hoàn toàn offline sau khi model đã được cache.
+
+### 6. Xuất các đoạn lineup thành clip MP4
+
+Mỗi dòng trong `lineup_segments.csv` được xuất thành một file MP4 riêng:
+
+```bash
+python src/lineup/export_clips.py
+```
+
+Mặc định script đọc video nguồn từ `data/raw_videos/` và lưu clip vào
+`outputs/clips/`. Điểm cắt được tái mã hóa bằng H.264/AAC để bám chính xác mốc
+thời gian. Có thể chọn file segment khác, ví dụ:
+
+```bash
+python src/lineup/export_clips.py \
+  --segments-csv outputs/predictions/premier_match_01_segments.csv
+```
+
+Nếu ưu tiên tốc độ và chấp nhận điểm cắt có thể lệch theo keyframe:
+
+```bash
+python src/lineup/export_clips.py --copy-codecs
+```
+
+Script không ghi đè clip đã có. Truyền `--overwrite` khi muốn thay thế chúng.
+CSV đầu vào cần có cột `video` và cặp `start_seconds`/`end_seconds` hoặc
+`start`/`end`.
+
+### 7. Đánh giá theo đoạn trên tập test
 
 Đánh giá xem model có tìm đủ hai đoạn lineup, lệch mốc bao nhiêu và có nhận
 nhầm khoảng giới thiệu trọng tài/bắt tay hay không:
 
 ```bash
-python src/evaluate_segments.py
+python src/lineup/evaluate_segments.py
 ```
 
 Script mặc định dùng `pred_label` của các dòng `split=test`, ghép frame thành
@@ -270,7 +397,7 @@ Các chỉ số chính gồm segment precision/recall/F1, temporal IoU, sai số
 Để đánh giá cùng rule hậu xử lý sẽ dùng khi vận hành:
 
 ```bash
-python src/evaluate_segments.py \
+python src/lineup/evaluate_segments.py \
   --merge-gap-seconds 6 \
   --min-duration-seconds 8
 ```
@@ -281,8 +408,16 @@ cùng.
 
 ## Ghi chú
 
-- Pipeline hiện chỉ sử dụng MobileNetV3-Small; không còn baseline logistic
-  regression hoặc bước OCR.
+- Bước phát hiện đoạn lineup sử dụng MobileNetV3-Small ở `0,5 FPS`.
+  PaddleOCR được tách thành môi trường riêng và chỉ chạy ở `2 FPS` trong những
+  đoạn đã phát hiện.
+- `resolve_lineup.py` ghép kết quả theo thời gian và tọa độ, không tra cứu
+  roster trên mạng.
+- Resolver hiện hỗ trợ danh sách số-tên cùng hàng, dòng OCR gộp
+  `số + tên`, sơ đồ số-tên cùng slot và sơ đồ được hiện dần qua nhiều frame.
+  Kiểu đồ họa chỉ có số trên một mini-pitch nhưng tên hiện riêng ở vùng khác
+  cần thêm bộ theo dõi slot đang được highlight; diagnostics sẽ giữ các đoạn
+  này ở trạng thái `unresolved` thay vì ghép đoán.
 - Temporal smoothing là centered mean, phù hợp xử lý video offline vì sử dụng
   cả frame trước và frame sau.
 - Tên frame không chứa timestamp thật. `build_frame_labels.py` luôn dùng

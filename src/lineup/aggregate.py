@@ -9,7 +9,7 @@ import pandas as pd
 from utils import ensure_dir, seconds_to_timestamp
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_PREDICTIONS_CSV = (
     PROJECT_ROOT / "outputs" / "predictions" / "mobilenet_v3_small_inference.csv"
 )
@@ -202,7 +202,7 @@ def main() -> int:
 
     if not args.predictions_csv.exists():
         print(f"Predictions CSV does not exist: {args.predictions_csv}")
-        print("Run python src/predict_mobilenet.py first.")
+        print("Run python src/lineup/predict_mobilenet.py first.")
         return 1
 
     predictions = pd.read_csv(args.predictions_csv)

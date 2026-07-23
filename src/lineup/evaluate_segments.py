@@ -11,7 +11,7 @@ from aggregate import predictions_to_segments, smooth_segments
 from utils import ensure_dir, seconds_to_timestamp, timestamp_range_to_seconds
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_GROUND_TRUTH_CSV = PROJECT_ROOT / "data" / "ground_truth.csv"
 DEFAULT_PREDICTIONS_CSV = (
     PROJECT_ROOT
