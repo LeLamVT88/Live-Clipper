@@ -16,7 +16,9 @@ live-clipper/
 │   ├── processed/         # metadata và dataset CSV
 │   └── ground_truth.csv   # khoảng lineup của Đội 1 và Đội 2
 ├── outputs/
-│   ├── predictions/       # checkpoint, metrics và kết quả dự đoán
+│   ├── predictions/
+│   │   ├── mobilenet/     # checkpoint, predictions, segments và metrics
+│   │   └── ocr/           # OCR thô, lineup đã resolve và diagnostics
 │   └── clips/             # clip lineup được cắt từ video gốc
 ├── src/
 │   ├── lineup/            # phát hiện và xuất clip lineup
@@ -176,10 +178,10 @@ smoothing. Test chỉ được đánh giá sau khi các lựa chọn này hoàn 
 Kết quả:
 
 ```text
-outputs/predictions/mobilenet_v3_small_lineup.pt
-outputs/predictions/mobilenet_v3_small_metrics.csv
-outputs/predictions/mobilenet_v3_small_history.csv
-outputs/predictions/mobilenet_v3_small_predictions.csv
+outputs/predictions/mobilenet/mobilenet_v3_small_lineup.pt
+outputs/predictions/mobilenet/mobilenet_v3_small_metrics.csv
+outputs/predictions/mobilenet/mobilenet_v3_small_history.csv
+outputs/predictions/mobilenet/mobilenet_v3_small_predictions.csv
 ```
 
 Có thể chọn thiết bị thủ công:
@@ -221,7 +223,7 @@ Script tự đọc từ checkpoint:
 Kết quả được lưu tại:
 
 ```text
-outputs/predictions/mobilenet_v3_small_inference.csv
+outputs/predictions/mobilenet/mobilenet_v3_small_inference.csv
 ```
 
 Các cột kết quả quan trọng:
@@ -238,7 +240,7 @@ Có thể truyền input hoặc output khác:
 ```bash
 python src/lineup/predict_mobilenet.py \
   --input-csv data/processed/new_match/extracted_frames.csv \
-  --output-csv outputs/predictions/new_match_predictions.csv
+  --output-csv outputs/predictions/mobilenet/new_match_predictions.csv
 ```
 
 ### 3. Gom prediction thành đoạn lineup
@@ -253,7 +255,7 @@ Mặc định `aggregate.py` dùng `pred_label`, tức nhãn đã áp dụng smo
 threshold lưu trong checkpoint. Kết quả:
 
 ```text
-outputs/predictions/lineup_segments.csv
+outputs/predictions/mobilenet/lineup_segments.csv
 ```
 
 Nếu muốn thử threshold khác, script sẽ ưu tiên `smoothed_score`:
@@ -275,15 +277,15 @@ Có thể chọn file segment cụ thể:
 
 ```bash
 .venv/bin/python src/ocr/run_lineup_ocr.py \
-  --segments-csv outputs/predictions/premier_match_01_segments.csv
+  --segments-csv outputs/predictions/mobilenet/premier_match_01_segments.csv
 ```
 
 Mặc định script dùng `2 FPS`, model CPU nhẹ và ngưỡng OCR `0.80`. Kết quả:
 
 ```text
 data/ocr_frames/<video>/segment_01/*.jpg
-outputs/predictions/ocr_frames.csv
-outputs/predictions/ocr_raw_detections.csv
+outputs/predictions/ocr/ocr_frames.csv
+outputs/predictions/ocr/ocr_raw_detections.csv
 ```
 
 `ocr_frames.csv` chứa timestamp của từng frame. `ocr_raw_detections.csv` chứa
@@ -319,8 +321,8 @@ Resolver không dùng roster hoặc API. Script tự:
 Kết quả:
 
 ```text
-outputs/predictions/resolved_lineups.csv
-outputs/predictions/resolved_lineups_diagnostics.csv
+outputs/predictions/ocr/resolved_lineups.csv
+outputs/predictions/ocr/resolved_lineups_diagnostics.csv
 ```
 
 Các cột chính:
@@ -359,7 +361,7 @@ thời gian. Có thể chọn file segment khác, ví dụ:
 
 ```bash
 python src/lineup/export_clips.py \
-  --segments-csv outputs/predictions/premier_match_01_segments.csv
+  --segments-csv outputs/predictions/mobilenet/premier_match_01_segments.csv
 ```
 
 Nếu ưu tiên tốc độ và chấp nhận điểm cắt có thể lệch theo keyframe:
@@ -386,9 +388,9 @@ khoảng nửa mở `[start, end)` và tính detection tại temporal IoU từ `
 file kết quả được lưu tại:
 
 ```text
-outputs/predictions/mobilenet_v3_small_segment_matches.csv
-outputs/predictions/mobilenet_v3_small_segment_metrics_by_video.csv
-outputs/predictions/mobilenet_v3_small_segment_metrics.csv
+outputs/predictions/mobilenet/mobilenet_v3_small_segment_matches.csv
+outputs/predictions/mobilenet/mobilenet_v3_small_segment_metrics_by_video.csv
+outputs/predictions/mobilenet/mobilenet_v3_small_segment_metrics.csv
 ```
 
 Các chỉ số chính gồm segment precision/recall/F1, temporal IoU, sai số mốc

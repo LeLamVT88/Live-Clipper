@@ -17,24 +17,28 @@ DEFAULT_PREDICTIONS_CSV = (
     PROJECT_ROOT
     / "outputs"
     / "predictions"
+    / "mobilenet"
     / "mobilenet_v3_small_predictions.csv"
 )
 DEFAULT_DETAILS_OUTPUT = (
     PROJECT_ROOT
     / "outputs"
     / "predictions"
+    / "mobilenet"
     / "mobilenet_v3_small_segment_matches.csv"
 )
 DEFAULT_PER_VIDEO_OUTPUT = (
     PROJECT_ROOT
     / "outputs"
     / "predictions"
+    / "mobilenet"
     / "mobilenet_v3_small_segment_metrics_by_video.csv"
 )
 DEFAULT_METRICS_OUTPUT = (
     PROJECT_ROOT
     / "outputs"
     / "predictions"
+    / "mobilenet"
     / "mobilenet_v3_small_segment_metrics.csv"
 )
 GROUND_TRUTH_COLUMNS = {"video", "Đội 1", "Đội 2"}

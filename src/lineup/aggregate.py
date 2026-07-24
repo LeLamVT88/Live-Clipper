@@ -10,10 +10,11 @@ from utils import ensure_dir, seconds_to_timestamp
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "predictions" / "mobilenet"
 DEFAULT_PREDICTIONS_CSV = (
-    PROJECT_ROOT / "outputs" / "predictions" / "mobilenet_v3_small_inference.csv"
+    DEFAULT_OUTPUT_DIR / "mobilenet_v3_small_inference.csv"
 )
-DEFAULT_OUTPUT_CSV = PROJECT_ROOT / "outputs" / "predictions" / "lineup_segments.csv"
+DEFAULT_OUTPUT_CSV = DEFAULT_OUTPUT_DIR / "lineup_segments.csv"
 
 
 def parse_args() -> argparse.Namespace:

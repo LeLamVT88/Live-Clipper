@@ -16,15 +16,15 @@ import pandas as pd
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+MOBILENET_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "predictions" / "mobilenet"
+OCR_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "predictions" / "ocr"
 DEFAULT_SEGMENTS_CSV = (
-    PROJECT_ROOT / "outputs" / "predictions" / "lineup_segments.csv"
+    MOBILENET_OUTPUT_DIR / "lineup_segments.csv"
 )
 DEFAULT_VIDEO_DIR = PROJECT_ROOT / "data" / "raw_videos"
 DEFAULT_FRAMES_DIR = PROJECT_ROOT / "data" / "ocr_frames"
-DEFAULT_FRAMES_CSV = PROJECT_ROOT / "outputs" / "predictions" / "ocr_frames.csv"
-DEFAULT_OUTPUT_CSV = (
-    PROJECT_ROOT / "outputs" / "predictions" / "ocr_raw_detections.csv"
-)
+DEFAULT_FRAMES_CSV = OCR_OUTPUT_DIR / "ocr_frames.csv"
+DEFAULT_OUTPUT_CSV = OCR_OUTPUT_DIR / "ocr_raw_detections.csv"
 DEFAULT_CACHE_DIR = PROJECT_ROOT / ".cache" / "paddlex"
 DETECTION_MODEL = "PP-OCRv6_small_det"
 RECOGNITION_MODEL = "PP-OCRv6_small_rec"

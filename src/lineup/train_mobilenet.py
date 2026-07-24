@@ -18,7 +18,7 @@ from utils import PROJECT_ROOT, ensure_dir, resolve_project_path
 
 
 DEFAULT_DATASET_CSV = PROJECT_ROOT / "data" / "processed" / "all_frame_labels.csv"
-DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "predictions"
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "predictions" / "mobilenet"
 DEFAULT_MODEL_OUTPUT = DEFAULT_OUTPUT_DIR / "mobilenet_v3_small_lineup.pt"
 DEFAULT_METRICS_OUTPUT = DEFAULT_OUTPUT_DIR / "mobilenet_v3_small_metrics.csv"
 DEFAULT_HISTORY_OUTPUT = DEFAULT_OUTPUT_DIR / "mobilenet_v3_small_history.csv"

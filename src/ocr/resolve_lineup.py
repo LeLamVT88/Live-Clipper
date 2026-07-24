@@ -17,12 +17,9 @@ import pandas as pd
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_INPUT_CSV = (
-    PROJECT_ROOT / "outputs" / "predictions" / "ocr_raw_detections.csv"
-)
-DEFAULT_OUTPUT_CSV = (
-    PROJECT_ROOT / "outputs" / "predictions" / "resolved_lineups.csv"
-)
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "predictions" / "ocr"
+DEFAULT_INPUT_CSV = DEFAULT_OUTPUT_DIR / "ocr_raw_detections.csv"
+DEFAULT_OUTPUT_CSV = DEFAULT_OUTPUT_DIR / "resolved_lineups.csv"
 REQUIRED_COLUMNS = {
     "video",
     "segment_index",

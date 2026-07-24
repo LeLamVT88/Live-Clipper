@@ -16,7 +16,11 @@ from utils import PROJECT_ROOT, ensure_dir, resolve_project_path, timestamp_to_s
 
 
 DEFAULT_SEGMENTS_CSV = (
-    PROJECT_ROOT / "outputs" / "predictions" / "lineup_segments.csv"
+    PROJECT_ROOT
+    / "outputs"
+    / "predictions"
+    / "mobilenet"
+    / "lineup_segments.csv"
 )
 DEFAULT_VIDEO_DIR = PROJECT_ROOT / "data" / "raw_videos"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "clips"

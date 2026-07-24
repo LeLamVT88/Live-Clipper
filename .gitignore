@@ -26,7 +26,12 @@ data/processed/*
 !data/processed/.gitkeep
 
 outputs/predictions/*
-!outputs/predictions/.gitkeep
+!outputs/predictions/mobilenet/
+!outputs/predictions/ocr/
+outputs/predictions/mobilenet/*
+!outputs/predictions/mobilenet/.gitkeep
+outputs/predictions/ocr/*
+!outputs/predictions/ocr/.gitkeep
 
 outputs/clips/*
 !outputs/clips/.gitkeep
