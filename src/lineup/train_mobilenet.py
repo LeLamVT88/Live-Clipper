@@ -22,7 +22,9 @@ DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "predictions" / "mobilenet"
 DEFAULT_MODEL_OUTPUT = DEFAULT_OUTPUT_DIR / "mobilenet_v3_small_lineup.pt"
 DEFAULT_METRICS_OUTPUT = DEFAULT_OUTPUT_DIR / "mobilenet_v3_small_metrics.csv"
 DEFAULT_HISTORY_OUTPUT = DEFAULT_OUTPUT_DIR / "mobilenet_v3_small_history.csv"
-DEFAULT_PREDICTIONS_OUTPUT = DEFAULT_OUTPUT_DIR / "mobilenet_v3_small_predictions.csv"
+DEFAULT_PREDICTIONS_OUTPUT = (
+    DEFAULT_OUTPUT_DIR / "mobilenet_v3_small_predictions.csv"
+)
 REQUIRED_COLUMNS = {
     "split",
     "video_id",

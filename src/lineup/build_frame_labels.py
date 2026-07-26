@@ -13,8 +13,8 @@ from utils import ensure_dir, timestamp_range_to_seconds
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_GROUND_TRUTH_CSV = PROJECT_ROOT / "data" / "ground_truth.csv"
 DEFAULT_PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
-DEFAULT_FRAME_METADATA_CSV = PROJECT_ROOT / "data" / "processed" / "extracted_frames.csv"
-DEFAULT_OUTPUT_CSV = PROJECT_ROOT / "data" / "processed" / "frame_labels.csv"
+DEFAULT_FRAME_METADATA_CSV = DEFAULT_PROCESSED_DIR / "extracted_frames.csv"
+DEFAULT_OUTPUT_CSV = DEFAULT_PROCESSED_DIR / "frame_labels.csv"
 TEAM_COLUMNS = ("Đội 1", "Đội 2")
 GROUND_TRUTH_COLUMNS = {"video", *TEAM_COLUMNS}
 FRAME_METADATA_COLUMNS = {"video", "frame_path", "timestamp", "timestamp_seconds"}
@@ -26,10 +26,17 @@ class LabelBuildError(Exception):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Build frame-level labels from ground_truth.csv and extracted frame metadata."
+        description=(
+            "Build frame-level labels from lineup ground truth and "
+            "extracted-frame metadata."
+        )
     )
     parser.add_argument("--ground-truth-csv", type=Path, default=DEFAULT_GROUND_TRUTH_CSV)
-    parser.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
+    parser.add_argument(
+        "--processed-dir",
+        type=Path,
+        default=DEFAULT_PROCESSED_DIR,
+    )
     parser.add_argument("--frame-metadata-csv", type=Path, default=DEFAULT_FRAME_METADATA_CSV)
     parser.add_argument("--output-csv", type=Path, default=DEFAULT_OUTPUT_CSV)
     parser.add_argument(
@@ -40,7 +47,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-per-video-output",
         action="store_true",
-        help="Only write --output-csv, without per-video processed CSV files.",
+        help="Only write --output-csv, without per-video metadata CSV files.",
     )
     return parser.parse_args()
 
@@ -126,7 +133,8 @@ def warn_unlabeled_videos(
         return
 
     print(
-        "Warning: these videos do not appear in ground_truth.csv and will be labeled 0:",
+        "Warning: these videos do not appear in "
+        "ground_truth.csv and will be labeled 0:",
         file=sys.stderr,
     )
     for video in unlabeled_videos:
@@ -181,7 +189,9 @@ def get_video_processed_dir_name(video_group: pd.DataFrame) -> str:
 
 def write_per_video_outputs(labels: pd.DataFrame, processed_dir: Path) -> None:
     for _, video_group in labels.groupby("video", sort=False):
-        video_dir = ensure_dir(processed_dir / get_video_processed_dir_name(video_group))
+        video_dir = ensure_dir(
+            processed_dir / get_video_processed_dir_name(video_group)
+        )
         frame_metadata_csv = video_dir / "extracted_frames.csv"
         frame_labels_csv = video_dir / "frame_labels.csv"
 
@@ -209,7 +219,8 @@ def main() -> int:
             metadata = metadata[metadata["video"].isin(ranges_by_video)].copy()
             if metadata.empty:
                 raise LabelBuildError(
-                    "No frame metadata matches videos in ground_truth.csv."
+                    "No frame metadata matches videos in "
+                    "ground_truth.csv."
                 )
         else:
             warn_unlabeled_videos(metadata, ranges_by_video)

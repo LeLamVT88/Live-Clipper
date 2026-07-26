@@ -1,8 +1,9 @@
 # Live Clipper - Football Lineup Detection
 
 Project dùng MobileNetV3-Small ở `0,5 FPS` để phát hiện đoạn đội hình trong
-video bóng đá. Sau đó project chỉ tách các đoạn lineup ở `2 FPS` và dùng
-PaddleOCR để đọc tên, số áo.
+video bóng đá. Trong mỗi segment, project tách frame ở `2 FPS`, dùng scout OCR
+ở `0,5 FPS` để tìm bảng lineup hoàn chỉnh rồi OCR thích ứng 3 frame, 7 frame
+hoặc toàn segment sau khi đã bỏ vùng `SUBSTITUTES`.
 
 ## Cấu trúc thư mục
 
@@ -10,15 +11,16 @@ PaddleOCR để đọc tên, số áo.
 live-clipper/
 ├── data/
 │   ├── raw_videos/        # video gốc
-│   ├── frames/            # frame 0,5 FPS cho MobileNet
-│   ├── ocr_frames/        # frame 2 FPS chỉ trong các đoạn lineup
+│   ├── frames/  # frame 0,5 FPS cho bộ phát hiện
+│   ├── ocr_frames/     # frame 2 FPS chỉ trong các đoạn lineup
+│   ├── ocr_selected_frames/ # frame/crop được chọn cho OCR
 │   ├── ocr_samples/       # frame và ground truth để phát triển OCR
-│   ├── processed/         # metadata và dataset CSV
+│   ├── processed/ # metadata, label và dataset phát hiện
 │   └── ground_truth.csv   # khoảng lineup của Đội 1 và Đội 2
 ├── outputs/
 │   ├── predictions/
-│   │   ├── mobilenet/     # checkpoint, predictions, segments và metrics
-│   │   └── ocr/           # OCR thô, lineup đã resolve và diagnostics
+│   │   ├── mobilenet/ # model, frame prediction và segment
+│   │   └── ocr/ # OCR, lineup và diagnostics
 │   └── clips/             # clip lineup được cắt từ video gốc
 ├── src/
 │   ├── lineup/            # phát hiện và xuất clip lineup
@@ -33,8 +35,26 @@ live-clipper/
 │   │   └── evaluate_segments.py
 │   └── ocr/               # tách frame lineup và đọc tên, số áo
 │       ├── ocr_smoke_test.py
-│       ├── run_lineup_ocr.py
-│       └── resolve_lineup.py
+│       ├── run_pipeline.py # entrypoint duy nhất
+│       ├── config.py       # cấu hình và tham số CLI
+│       ├── workflow.py     # điều phối ba tầng fallback
+│       ├── attempts.py     # chạy OCR/resolve một lần thử
+│       ├── frames.py       # đọc segment và tách frame
+│       ├── ocr_engine.py   # adapter PaddleOCR
+│       ├── selector.py     # chấm điểm và chọn frame lineup
+│       ├── selection_io.py # crop frame và ghi diagnostics
+│       └── resolver/
+│           ├── common.py
+│           ├── layout.py
+│           ├── table.py
+│           ├── table_refinement.py
+│           ├── formation.py
+│           ├── formation_refinement.py
+│           ├── player_names.py
+│           ├── local_models.py
+│           ├── quality.py
+│           ├── schema.py
+│           └── pipeline.py
 ├── .gitignore
 ├── README.md
 └── requirements.txt
@@ -264,59 +284,99 @@ Nếu muốn thử threshold khác, script sẽ ưu tiên `smoothed_score`:
 python src/lineup/aggregate.py --threshold 0.6
 ```
 
-### 4. Tách đoạn lineup ở 2 FPS và chạy OCR
+### 4. Chạy toàn bộ pipeline lineup bằng một lệnh
 
 Script đọc `lineup_segments.csv`, quay lại video gốc và chỉ tách frame trong
-các khoảng lineup. MobileNet vẫn chạy ở `0,5 FPS`; `2 FPS` chỉ dùng cho OCR:
+các khoảng lineup. MobileNet vẫn chạy ở `0,5 FPS`; các frame ứng viên được
+tách ở `2 FPS`:
 
 ```bash
-.venv/bin/python src/ocr/run_lineup_ocr.py
+.venv/bin/python src/ocr/run_pipeline.py
 ```
 
 Có thể chọn file segment cụ thể:
 
 ```bash
-.venv/bin/python src/ocr/run_lineup_ocr.py \
+.venv/bin/python src/ocr/run_pipeline.py \
   --segments-csv outputs/predictions/mobilenet/premier_match_01_segments.csv
 ```
 
-Mặc định script dùng `2 FPS`, model CPU nhẹ và ngưỡng OCR `0.80`. Kết quả:
+Mặc định pipeline:
+
+1. Scout OCR toàn frame ở `0,5 FPS`.
+2. Nhận diện layout sơ đồ hoặc danh sách số-tên.
+3. Nếu có `SUBSTITUTES`, tự xác định bảng nằm bên trái/phải và crop phía đội
+   hình đối diện.
+4. Tầng 1 OCR ba frame trải đều trong cùng cảnh lineup rồi resolve.
+5. Quality gate chỉ chấp nhận kết quả đủ 11 người, 11 số áo khác nhau, tên
+   không rỗng/không chứa token giao diện và mọi cặp số-tên đạt confidence
+   tối thiểu `0.80`.
+6. Segment không đạt được thử lại ở tầng 2 với bảy frame. Ba frame cũ được
+   tái sử dụng, nên chỉ bốn frame mới phải chạy OCR.
+7. Nếu vẫn không đạt, tầng 3 OCR toàn bộ frame `2 FPS` của riêng segment đó.
+   Segment scout không tìm được bảng lineup cũng đi thẳng tới tầng này.
+
+Pipeline dùng model CPU nhẹ và ngưỡng OCR `0.80`. Kết quả:
 
 ```text
 data/ocr_frames/<video>/segment_01/*.jpg
+data/ocr_selected_frames/<video>/segment_01/*.jpg
 outputs/predictions/ocr/ocr_frames.csv
+outputs/predictions/ocr/ocr_scout_detections.csv
+outputs/predictions/ocr/ocr_selected_frames.csv
+outputs/predictions/ocr/ocr_frame_selection_diagnostics.csv
 outputs/predictions/ocr/ocr_raw_detections.csv
+outputs/predictions/ocr/pipeline_attempts.csv
+outputs/predictions/ocr/resolved_lineups.csv
+outputs/predictions/ocr/resolved_lineups_diagnostics.csv
 ```
 
-`ocr_frames.csv` chứa timestamp của từng frame. `ocr_raw_detections.csv` chứa
-text, confidence, bounding box và tọa độ tâm chuẩn hóa để bước sau ghép tên với
-số áo xuyên nhiều frame.
+`ocr_frames.csv` chứa toàn bộ timestamp `2 FPS`.
+`ocr_frame_selection_diagnostics.csv` ghi layout, vùng crop, frame được chọn và
+trạng thái fallback của từng segment. `ocr_raw_detections.csv` chỉ chứa kết quả
+OCR của tầng cuối được dùng cho từng segment. `pipeline_attempts.csv` ghi số
+frame, số frame OCR mới, trạng thái resolver và kết quả quality gate ở mỗi
+tầng. `resolved_lineups.csv` chỉ chứa các lineup đã vượt quality gate.
+
+Có thể thay đổi số frame hoặc ngưỡng quality gate:
+
+```bash
+.venv/bin/python src/ocr/run_pipeline.py \
+  --initial-frame-count 3 \
+  --expanded-frame-count 7 \
+  --min-pair-confidence 0.80
+```
 
 Để chỉ kiểm tra việc tách frame mà chưa chạy OCR:
 
 ```bash
-.venv/bin/python src/ocr/run_lineup_ocr.py --extract-only
+.venv/bin/python src/ocr/run_pipeline.py --extract-only
 ```
 
-### 5. Gộp đa frame và ghép tên với số áo
+### 5. Cách resolver ghép tên với số áo
 
-Sau khi có `ocr_raw_detections.csv`, chạy:
-
-```bash
-.venv/bin/python src/ocr/resolve_lineup.py
-```
-
-Resolver không dùng roster hoặc API. Script tự:
+`run_pipeline.py` tự gọi resolver; không còn entrypoint resolve riêng.
+Resolver không dùng roster hoặc API và tự:
 
 1. Đọc dòng dạng danh sách, kể cả khi OCR gộp thành
    `99 DONNARUMMA`.
-2. Tìm các frame hiển thị sơ đồ đội hình dựa trên số lượng và vị trí số áo.
-3. Gom số áo và tên theo cùng một slot xuyên nhiều frame.
-4. Nếu số áo quá nhỏ hoặc bị dính theo cột, chỉ OCR lại các ô số trên tối đa
-   ba frame đại diện. Không OCR lại toàn bộ clip.
-5. Loại vùng danh sách dự bị để số áo dự bị không bị ghép nhầm vào đội hình.
-6. Tách nhiều đội hình nếu hai đội nằm trong cùng một segment.
-7. Dùng đồng thuận đa frame để sửa biến thể OCR và ghép tên đầy đủ.
+2. Tìm các frame hiển thị sơ đồ đội hình dựa trên các cặp số áo/tên đã đọc
+   được; các tên còn lại trong cùng vùng sơ đồ được dùng làm anchor để OCR lại
+   số ngay phía trên.
+3. Nếu frame đồng thời có bảng `SUBSTITUTES` và sơ đồ xuất phát, tự xác định
+   bảng dự bị nằm bên trái hay bên phải, loại đúng phía đó và chỉ xử lý phía
+   sơ đồ.
+4. Gom số áo và tên theo cùng một slot xuyên nhiều frame.
+5. Nếu số áo quá nhỏ hoặc bị dính theo cột, chỉ OCR lại các ô số trên tối đa
+   ba frame đại diện. Mỗi ô được nhận dạng trên ảnh màu, grayscale, CLAHE,
+   Otsu và ảnh đảo màu; kết quả được chọn bằng đồng thuận thay vì tin một lần
+   đọc duy nhất.
+6. Loại vùng danh sách dự bị để số áo dự bị không bị ghép nhầm vào đội hình.
+7. Tách nhiều đội hình nếu hai đội nằm trong cùng một segment.
+8. Dùng đồng thuận đa frame để sửa biến thể OCR và ghép tên đầy đủ; loại các
+   token giao diện như `TEAM FORMATION`.
+9. Chỉ xuất lineup khi đủ 11 cầu thủ và 11 số áo là duy nhất. Nếu còn số trùng,
+   diagnostics giữ segment ở trạng thái `unresolved`.
 
 Kết quả:
 
@@ -338,10 +398,10 @@ lineup_index,resolution_method,shirt_number,formation_label,player_name,pair_con
 segment với trạng thái `resolved`/`unresolved` và nguyên nhân. Resolver chỉ
 xuất lineup khi tìm đủ số cầu thủ yêu cầu; nó không tự đoán cho đủ 11.
 
-Nếu chỉ muốn kiểm tra kết quả OCR toàn frame và tắt lượt OCR cục bộ:
+Có thể tắt lượt OCR cục bộ khi cần cô lập lỗi:
 
 ```bash
-.venv/bin/python src/ocr/resolve_lineup.py --disable-local-ocr
+.venv/bin/python src/ocr/run_pipeline.py --disable-local-ocr
 ```
 
 Lượt OCR cục bộ là cần thiết với các kiểu đồ họa có số rất nhỏ trên áo hoặc
@@ -411,10 +471,12 @@ cùng.
 ## Ghi chú
 
 - Bước phát hiện đoạn lineup sử dụng MobileNetV3-Small ở `0,5 FPS`.
-  PaddleOCR được tách thành môi trường riêng và chỉ chạy ở `2 FPS` trong những
-  đoạn đã phát hiện.
-- `resolve_lineup.py` ghép kết quả theo thời gian và tọa độ, không tra cứu
-  roster trên mạng.
+  Trong segment đã phát hiện, scout OCR chạy ở `0,5 FPS`; OCR chi tiết thử lần
+  lượt 3 frame, 7 frame rồi toàn segment `2 FPS` khi quality gate yêu cầu.
+- `run_pipeline.py` là entrypoint duy nhất; phần workflow, OCR và resolver là
+  module nội bộ, không cần gọi riêng.
+- Resolver ghép kết quả theo thời gian và tọa độ, không tra cứu roster trên
+  mạng.
 - Resolver hiện hỗ trợ danh sách số-tên cùng hàng, dòng OCR gộp
   `số + tên`, sơ đồ số-tên cùng slot và sơ đồ được hiện dần qua nhiều frame.
   Kiểu đồ họa chỉ có số trên một mini-pitch nhưng tên hiện riêng ở vùng khác

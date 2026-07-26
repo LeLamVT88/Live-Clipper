@@ -12,7 +12,12 @@ from pathlib import Path
 
 import pandas as pd
 
-from utils import PROJECT_ROOT, ensure_dir, resolve_project_path, timestamp_to_seconds
+from utils import (
+    PROJECT_ROOT,
+    ensure_dir,
+    resolve_project_path,
+    timestamp_to_seconds,
+)
 
 
 DEFAULT_SEGMENTS_CSV = (

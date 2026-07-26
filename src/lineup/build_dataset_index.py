@@ -23,7 +23,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Merge per-video frame label CSV files into one dataset index."
     )
-    parser.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
+    parser.add_argument(
+        "--processed-dir",
+        type=Path,
+        default=DEFAULT_PROCESSED_DIR,
+    )
     parser.add_argument("--output-csv", type=Path, default=DEFAULT_OUTPUT_CSV)
     parser.add_argument("--val-video", action="append", default=[])
     parser.add_argument("--test-video", action="append", default=[])
@@ -40,17 +44,22 @@ def parse_args() -> argparse.Namespace:
 
 def find_label_csvs(processed_dir: Path) -> list[Path]:
     if not processed_dir.exists():
-        raise DatasetIndexError(f"Processed directory does not exist: {processed_dir}")
+        raise DatasetIndexError(
+            f"Processed directory does not exist: {processed_dir}"
+        )
 
     label_csvs = []
-    for csv_path in sorted(processed_dir.glob("*/frame_labels.csv")):
+    for csv_path in sorted(
+        processed_dir.glob("*/frame_labels.csv")
+    ):
         if csv_path.parent == processed_dir:
             continue
         label_csvs.append(csv_path)
 
     if not label_csvs:
         raise DatasetIndexError(
-            f"No per-video frame_labels.csv files found under {processed_dir}"
+            "No per-video frame_labels.csv files found under "
+            f"{processed_dir}"
         )
     return label_csvs
 

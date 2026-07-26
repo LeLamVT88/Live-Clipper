@@ -20,6 +20,9 @@ data/frames/*
 data/ocr_frames/*
 !data/ocr_frames/.gitkeep
 
+data/ocr_selected_frames/*
+!data/ocr_selected_frames/.gitkeep
+
 data/ocr_samples/
 
 data/processed/*

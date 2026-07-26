@@ -19,7 +19,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_INPUT_DIR = PROJECT_ROOT / "data" / "raw_videos"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data" / "frames"
 DEFAULT_PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
-DEFAULT_METADATA_CSV = PROJECT_ROOT / "data" / "processed" / "extracted_frames.csv"
+DEFAULT_METADATA_CSV = DEFAULT_PROCESSED_DIR / "extracted_frames.csv"
 DEFAULT_DURATION = "00:10:00"
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm"}
 
@@ -40,7 +40,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--input-dir", type=Path, default=DEFAULT_INPUT_DIR)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
-    parser.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
+    parser.add_argument(
+        "--processed-dir",
+        type=Path,
+        default=DEFAULT_PROCESSED_DIR,
+    )
     parser.add_argument("--metadata-csv", type=Path, default=DEFAULT_METADATA_CSV)
     parser.add_argument("--jpeg-quality", type=int, default=95)
     parser.add_argument(

@@ -17,20 +17,9 @@ from utils import PROJECT_ROOT, ensure_dir, resolve_project_path
 
 
 DEFAULT_INPUT_CSV = PROJECT_ROOT / "data" / "processed" / "extracted_frames.csv"
-DEFAULT_MODEL_PATH = (
-    PROJECT_ROOT
-    / "outputs"
-    / "predictions"
-    / "mobilenet"
-    / "mobilenet_v3_small_lineup.pt"
-)
-DEFAULT_OUTPUT_CSV = (
-    PROJECT_ROOT
-    / "outputs"
-    / "predictions"
-    / "mobilenet"
-    / "mobilenet_v3_small_inference.csv"
-)
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "predictions" / "mobilenet"
+DEFAULT_MODEL_PATH = DEFAULT_OUTPUT_DIR / "mobilenet_v3_small_lineup.pt"
+DEFAULT_OUTPUT_CSV = DEFAULT_OUTPUT_DIR / "mobilenet_v3_small_inference.csv"
 REQUIRED_COLUMNS = {"video", "frame_path", "timestamp", "timestamp_seconds"}
 
 
