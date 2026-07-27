@@ -8,26 +8,16 @@ import unicodedata
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Iterable
 
 import cv2
 import pandas as pd
 
+from .schema import FRAME_COLUMNS
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-FRAME_COLUMNS = [
-    "video",
-    "segment_index",
-    "segment_label",
-    "segment_start_seconds",
-    "segment_end_seconds",
-    "frame_index",
-    "frame_path",
-    "timestamp",
-    "timestamp_seconds",
-    "relative_seconds",
-    "frame_width",
-    "frame_height",
-]
+SegmentKey = tuple[str, int]
 
 
 class LineupOCRError(Exception):
@@ -42,6 +32,22 @@ class Segment:
     label: str
     start_seconds: float
     end_seconds: float
+
+
+def segment_key(row: Any) -> SegmentKey:
+    return str(row["video"]), int(row["segment_index"])
+
+
+def group_records_by_segment(
+    records: Iterable[dict[str, object]],
+) -> dict[SegmentKey, list[dict[str, object]]]:
+    grouped: defaultdict[
+        SegmentKey,
+        list[dict[str, object]],
+    ] = defaultdict(list)
+    for record in records:
+        grouped[segment_key(record)].append(record)
+    return dict(grouped)
 
 
 def resolve_project_path(path: Path) -> Path:

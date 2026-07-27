@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import pandas as pd
 
 from .common import LineupResolutionError
@@ -16,6 +18,221 @@ from .table import resolve_table_layout
 from .table_refinement import refine_table_numbers
 
 
+@dataclass
+class ResolutionResult:
+    records: list[dict[str, object]]
+    method: str = ""
+
+
+@dataclass
+class LocalOCRModels:
+    table_ocr: object | None = None
+    number_recognizer: object | None = None
+
+    def get_table_ocr(self, purpose: str) -> object:
+        if self.table_ocr is None:
+            print(f"Loading PaddleOCR for local {purpose} refinement...")
+            self.table_ocr = create_local_table_ocr()
+        return self.table_ocr
+
+    def get_number_recognizer(self) -> object:
+        if self.number_recognizer is None:
+            self.number_recognizer = create_local_number_recognizer()
+        return self.number_recognizer
+
+
+LOCAL_OCR_ERRORS = (
+    ImportError,
+    LineupResolutionError,
+    ModuleNotFoundError,
+    OSError,
+    ValueError,
+)
+
+
+def diagnostic_row(
+    video: object,
+    segment_index: object,
+    result: ResolutionResult,
+    messages: list[str],
+) -> dict[str, object]:
+    return {
+        "video": video,
+        "segment_index": int(segment_index),
+        "status": "resolved" if result.records else "unresolved",
+        "resolution_method": result.method,
+        "resolved_players": len(result.records),
+        "message": "; ".join(messages),
+    }
+
+
+def resolve_table(
+    segment: pd.DataFrame,
+    *,
+    expected_players: int,
+    enable_local_ocr: bool,
+    models: LocalOCRModels,
+    messages: list[str],
+) -> tuple[ResolutionResult, pd.DataFrame]:
+    table_records, table_count = resolve_table_layout(
+        segment,
+        expected_players=expected_players,
+    )
+    if table_records:
+        messages.append("Complete repeated table/list consensus.")
+        return ResolutionResult(table_records, "table"), segment
+
+    if table_count:
+        messages.append(
+            f"table/list pass found {table_count}/{expected_players} players"
+        )
+    can_refine = (
+        enable_local_ocr
+        and 4 <= table_count < expected_players
+        and "frame_path" in segment.columns
+    )
+    if not can_refine:
+        return ResolutionResult([]), segment
+
+    try:
+        refined, added_count = refine_table_numbers(
+            segment,
+            ocr=models.get_table_ocr("table-number"),
+            expected_players=expected_players,
+        )
+        if not added_count:
+            return ResolutionResult([]), segment
+
+        messages.append(
+            f"local table OCR added {added_count} number observations"
+        )
+        table_records, _ = resolve_table_layout(
+            refined,
+            expected_players=expected_players,
+        )
+        if table_records:
+            for record in table_records:
+                record["resolution_method"] = "table+local_ocr"
+            return ResolutionResult(
+                table_records,
+                "table+local_ocr",
+            ), refined
+        return ResolutionResult([]), refined
+    except LOCAL_OCR_ERRORS as exc:
+        messages.append(f"local table OCR unavailable: {exc}")
+        return ResolutionResult([]), segment
+
+
+def refine_formation(
+    segment: pd.DataFrame,
+    *,
+    enable_local_ocr: bool,
+    models: LocalOCRModels,
+    messages: list[str],
+) -> pd.DataFrame:
+    can_refine = (
+        enable_local_ocr
+        and "frame_path" in segment.columns
+        and bool(formation_refinement_frames(segment))
+    )
+    if not can_refine:
+        return segment
+
+    try:
+        refined, added_count = refine_formation_numbers(
+            segment,
+            ocr=models.get_table_ocr("formation-number"),
+            recognizer=models.get_number_recognizer(),
+        )
+        if added_count:
+            messages.append(
+                "local formation OCR added "
+                f"{added_count} number observations"
+            )
+            return refined
+    except LOCAL_OCR_ERRORS as exc:
+        messages.append(f"local formation OCR unavailable: {exc}")
+    return segment
+
+
+def resolve_formation(
+    segment: pd.DataFrame,
+    *,
+    expected_players: int,
+    min_number_count: int,
+    max_gap_seconds: float,
+    signature_threshold: float,
+    enable_local_ocr: bool,
+    models: LocalOCRModels,
+    messages: list[str],
+) -> ResolutionResult:
+    resolution_args = {
+        "expected_players": expected_players,
+        "min_number_count": min_number_count,
+        "max_gap_seconds": max_gap_seconds,
+        "signature_threshold": signature_threshold,
+    }
+    _, initial_events, initial_records, initial_errors = (
+        attempt_formation_resolution(segment, **resolution_args)
+    )
+    if initial_events and not initial_errors:
+        return ResolutionResult(initial_records, "formation")
+
+    refined = refine_formation(
+        segment,
+        enable_local_ocr=enable_local_ocr,
+        models=models,
+        messages=messages,
+    )
+    if refined is segment:
+        events = initial_events
+        records = initial_records
+        event_errors = initial_errors
+    else:
+        _, events, records, event_errors = (
+            attempt_formation_resolution(refined, **resolution_args)
+        )
+
+    if not events:
+        messages.append("no formation snapshot found")
+        return ResolutionResult([])
+
+    method = (
+        "formation+local_ocr"
+        if any(
+            message.startswith("local formation OCR added")
+            for message in messages
+        )
+        else "formation"
+    )
+    for record in records:
+        record["resolution_method"] = method
+    messages.extend(
+        (
+            f"ignored incomplete formation candidate: {error}"
+            if records
+            else error
+        )
+        for error in event_errors
+    )
+    return ResolutionResult(records, method if records else "")
+
+
+def report_resolution(
+    video: object,
+    segment_index: object,
+    result: ResolutionResult,
+) -> None:
+    label = f"{video}, segment {int(segment_index)}"
+    if result.records:
+        print(
+            f"{label}: {len(result.records)} players resolved "
+            f"from {result.method}"
+        )
+    else:
+        print(f"{label}: unresolved")
+
+
 def resolve_all_lineups(
     detections: pd.DataFrame,
     expected_players: int,
@@ -26,277 +243,34 @@ def resolve_all_lineups(
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     records: list[dict[str, object]] = []
     diagnostics: list[dict[str, object]] = []
-    local_ocr: object | None = None
-    local_number_recognizer: object | None = None
+    models = LocalOCRModels()
 
-    grouped = detections.groupby(
-        ["video", "segment_index"],
-        sort=False,
-    )
+    grouped = detections.groupby(["video", "segment_index"], sort=False)
     for (video, segment_index), segment in grouped:
         messages: list[str] = []
-        table_records, table_count = resolve_table_layout(
+        result, segment = resolve_table(
             segment,
             expected_players=expected_players,
+            enable_local_ocr=enable_local_ocr,
+            models=models,
+            messages=messages,
         )
-        if table_records:
-            records.extend(table_records)
-            diagnostics.append(
-                {
-                    "video": video,
-                    "segment_index": int(segment_index),
-                    "status": "resolved",
-                    "resolution_method": "table",
-                    "resolved_players": len(table_records),
-                    "message": (
-                        "Complete repeated table/list consensus."
-                    ),
-                }
+        if not result.records:
+            result = resolve_formation(
+                segment,
+                expected_players=expected_players,
+                min_number_count=min_number_count,
+                max_gap_seconds=max_gap_seconds,
+                signature_threshold=signature_threshold,
+                enable_local_ocr=enable_local_ocr,
+                models=models,
+                messages=messages,
             )
-            print(
-                f"{video}, segment {int(segment_index)}: "
-                f"{len(table_records)} players resolved "
-                f"from table/list"
-            )
-            continue
 
-        if table_count:
-            messages.append(
-                f"table/list pass found {table_count}/"
-                f"{expected_players} players"
-            )
-        if (
-            enable_local_ocr
-            and 4 <= table_count < expected_players
-            and "frame_path" in segment.columns
-        ):
-            try:
-                if local_ocr is None:
-                    print(
-                        "Loading PaddleOCR for local "
-                        "table-number refinement..."
-                    )
-                    local_ocr = create_local_table_ocr()
-                refined_segment, added_count = (
-                    refine_table_numbers(
-                        segment,
-                        ocr=local_ocr,
-                        expected_players=expected_players,
-                    )
-                )
-                if added_count:
-                    messages.append(
-                        f"local table OCR added {added_count} "
-                        "number observations"
-                    )
-                    (
-                        table_records,
-                        refined_table_count,
-                    ) = resolve_table_layout(
-                        refined_segment,
-                        expected_players=expected_players,
-                    )
-                    table_count = max(
-                        table_count,
-                        refined_table_count,
-                    )
-                    segment = refined_segment
-                if table_records:
-                    for record in table_records:
-                        record["resolution_method"] = (
-                            "table+local_ocr"
-                        )
-                    records.extend(table_records)
-                    diagnostics.append(
-                        {
-                            "video": video,
-                            "segment_index": int(
-                                segment_index
-                            ),
-                            "status": "resolved",
-                            "resolution_method": (
-                                "table+local_ocr"
-                            ),
-                            "resolved_players": len(
-                                table_records
-                            ),
-                            "message": "; ".join(messages),
-                        }
-                    )
-                    print(
-                        f"{video}, segment "
-                        f"{int(segment_index)}: "
-                        f"{len(table_records)} players resolved "
-                        f"from table/list after local OCR"
-                    )
-                    continue
-            except (
-                ImportError,
-                LineupResolutionError,
-                ModuleNotFoundError,
-                OSError,
-                ValueError,
-            ) as exc:
-                messages.append(
-                    f"local table OCR unavailable: {exc}"
-                )
-
-        (
-            _,
-            initial_events,
-            initial_records,
-            initial_errors,
-        ) = attempt_formation_resolution(
-            segment,
-            expected_players=expected_players,
-            min_number_count=min_number_count,
-            max_gap_seconds=max_gap_seconds,
-            signature_threshold=signature_threshold,
-        )
-        if initial_events and not initial_errors:
-            records.extend(initial_records)
-            diagnostics.append(
-                {
-                    "video": video,
-                    "segment_index": int(segment_index),
-                    "status": "resolved",
-                    "resolution_method": "formation",
-                    "resolved_players": len(initial_records),
-                    "message": "; ".join(messages),
-                }
-            )
-            print(
-                f"{video}, segment {int(segment_index)}: "
-                f"{len(initial_events)} formation(s), "
-                f"{len(initial_records)} players resolved"
-            )
-            continue
-
-        if (
-            enable_local_ocr
-            and "frame_path" in segment.columns
-            and formation_refinement_frames(segment)
-        ):
-            try:
-                if local_ocr is None:
-                    print(
-                        "Loading PaddleOCR for local "
-                        "formation-number refinement..."
-                    )
-                    local_ocr = create_local_table_ocr()
-                if local_number_recognizer is None:
-                    local_number_recognizer = (
-                        create_local_number_recognizer()
-                    )
-                refined_segment, added_count = (
-                    refine_formation_numbers(
-                        segment,
-                        ocr=local_ocr,
-                        recognizer=local_number_recognizer,
-                    )
-                )
-                if added_count:
-                    segment = refined_segment
-                    messages.append(
-                        f"local formation OCR added "
-                        f"{added_count} number observations"
-                    )
-            except (
-                ImportError,
-                LineupResolutionError,
-                ModuleNotFoundError,
-                OSError,
-                ValueError,
-            ) as exc:
-                messages.append(
-                    f"local formation OCR unavailable: {exc}"
-                )
-
-        (
-            _,
-            events,
-            segment_records,
-            event_errors,
-        ) = attempt_formation_resolution(
-            segment,
-            expected_players=expected_players,
-            min_number_count=min_number_count,
-            max_gap_seconds=max_gap_seconds,
-            signature_threshold=signature_threshold,
-        )
-        if not events:
-            messages.append("no formation snapshot found")
-            diagnostics.append(
-                {
-                    "video": video,
-                    "segment_index": int(segment_index),
-                    "status": "unresolved",
-                    "resolution_method": "",
-                    "resolved_players": 0,
-                    "message": "; ".join(messages),
-                }
-            )
-            print(
-                f"{video}, segment {int(segment_index)}: "
-                f"unresolved ({'; '.join(messages)})"
-            )
-            continue
-
-        print(
-            f"{video}, segment {int(segment_index)}: "
-            f"detected {len(events)} lineup formation(s)"
-        )
-        if segment_records:
-            print(
-                f"  resolved {len(segment_records)} player rows"
-            )
-        for error in event_errors:
-            label = (
-                "ignored incomplete candidate"
-                if segment_records
-                else "unresolved"
-            )
-            print(f"  {label} ({error})")
-
-        resolution_method = (
-            "formation+local_ocr"
-            if any(
-                message.startswith(
-                    "local formation OCR added"
-                )
-                for message in messages
-            )
-            else "formation"
-        )
-        for record in segment_records:
-            record["resolution_method"] = resolution_method
-        records.extend(segment_records)
-        messages.extend(
-            (
-                "ignored incomplete formation candidate: "
-                f"{error}"
-                if segment_records
-                else error
-            )
-            for error in event_errors
-        )
+        records.extend(result.records)
         diagnostics.append(
-            {
-                "video": video,
-                "segment_index": int(segment_index),
-                "status": (
-                    "resolved"
-                    if segment_records
-                    else "unresolved"
-                ),
-                "resolution_method": (
-                    resolution_method
-                    if segment_records
-                    else ""
-                ),
-                "resolved_players": len(segment_records),
-                "message": "; ".join(messages),
-            }
+            diagnostic_row(video, segment_index, result, messages)
         )
+        report_resolution(video, segment_index, result)
 
     return records, diagnostics

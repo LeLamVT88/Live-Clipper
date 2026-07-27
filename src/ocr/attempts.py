@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
 from dataclasses import dataclass
 from typing import Iterable
 
 import pandas as pd
 
 from .config import PipelineConfig
+from .frames import (
+    SegmentKey,
+    group_records_by_segment,
+    segment_key,
+)
 from .ocr_engine import run_ocr
 from .resolver import (
     LineupResolutionError,
@@ -16,41 +20,27 @@ from .resolver import (
     evaluate_segment_quality,
     resolve_all_lineups,
 )
+from .schema import ATTEMPT_COLUMNS
 from .selector import SegmentSelection
 
 
-SegmentKey = tuple[str, int]
-ATTEMPT_COLUMNS = [
-    "video",
-    "segment_index",
-    "attempt",
-    "tier",
-    "frame_count",
-    "new_ocr_frame_count",
-    "detection_count",
-    "resolver_status",
-    "resolved_players",
-    "quality_pass",
-    "quality_message",
-]
-
+Record = dict[str, object]
+RecordList = list[Record]
+GroupedRecords = dict[SegmentKey, RecordList]
+DiagnosticMap = dict[SegmentKey, Record]
 
 @dataclass
 class AttemptOutcome:
     tier: str
-    frame_records: dict[SegmentKey, list[dict[str, object]]]
-    detections: dict[SegmentKey, list[dict[str, object]]]
-    resolved_records: dict[SegmentKey, list[dict[str, object]]]
-    diagnostics: dict[SegmentKey, dict[str, object]]
+    frame_records: GroupedRecords
+    detections: GroupedRecords
+    resolved_records: GroupedRecords
+    diagnostics: DiagnosticMap
     quality: dict[SegmentKey, QualityResult]
-    attempt_rows: list[dict[str, object]]
+    attempt_rows: RecordList
 
 
-def segment_key(record: dict[str, object]) -> SegmentKey:
-    return str(record["video"]), int(record["segment_index"])
-
-
-def frame_identity(record: dict[str, object]) -> tuple[str, int, int, str]:
+def frame_identity(record: Record) -> tuple[str, int, int, str]:
     return (
         str(record["video"]),
         int(record["segment_index"]),
@@ -59,27 +49,18 @@ def frame_identity(record: dict[str, object]) -> tuple[str, int, int, str]:
     )
 
 
-def records_by_segment(
-    records: Iterable[dict[str, object]],
-) -> dict[SegmentKey, list[dict[str, object]]]:
-    grouped: defaultdict[SegmentKey, list[dict[str, object]]] = defaultdict(list)
-    for record in records:
-        grouped[segment_key(record)].append(record)
-    return dict(grouped)
-
-
 def filter_records_by_keys(
-    records: Iterable[dict[str, object]],
+    records: Iterable[Record],
     keys: set[SegmentKey],
-) -> list[dict[str, object]]:
+) -> RecordList:
     return [record for record in records if segment_key(record) in keys]
 
 
 def reusable_attempt_data(
-    target_records: list[dict[str, object]],
-    previous_records: list[dict[str, object]],
-    previous_detections: list[dict[str, object]],
-) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    target_records: RecordList,
+    previous_records: RecordList,
+    previous_detections: RecordList,
+) -> tuple[RecordList, RecordList]:
     """Return new OCR inputs and detections reusable from a prior tier."""
 
     target_ids = {frame_identity(record) for record in target_records}
@@ -100,17 +81,17 @@ def reusable_attempt_data(
 
 
 def _records_for_keys(
-    rows: Iterable[dict[str, object]],
+    rows: Iterable[Record],
     keys: list[SegmentKey],
-) -> dict[SegmentKey, list[dict[str, object]]]:
-    grouped = records_by_segment(rows)
+) -> GroupedRecords:
+    grouped = group_records_by_segment(rows)
     return {key: grouped.get(key, []) for key in keys}
 
 
 def _diagnostics_for_keys(
-    diagnostics: Iterable[dict[str, object]],
+    diagnostics: Iterable[Record],
     keys: list[SegmentKey],
-) -> dict[SegmentKey, dict[str, object]]:
+) -> DiagnosticMap:
     grouped = {
         segment_key(diagnostic): diagnostic
         for diagnostic in diagnostics
@@ -118,20 +99,19 @@ def _diagnostics_for_keys(
     return {key: grouped.get(key, {}) for key in keys}
 
 
-def perform_attempt(
+def _run_attempt_ocr(
     *,
     keys: list[SegmentKey],
-    attempt: int,
     tier: str,
-    target_records: list[dict[str, object]],
-    previous_records: dict[SegmentKey, list[dict[str, object]]],
-    previous_detections: dict[SegmentKey, list[dict[str, object]]],
+    target_records: RecordList,
+    previous_records: GroupedRecords,
+    previous_detections: GroupedRecords,
     ocr: object,
     config: PipelineConfig,
-) -> AttemptOutcome:
+) -> tuple[GroupedRecords, GroupedRecords, dict[SegmentKey, int]]:
     target_by_key = _records_for_keys(target_records, keys)
-    new_records: list[dict[str, object]] = []
-    reused_by_key: dict[SegmentKey, list[dict[str, object]]] = {}
+    new_records: RecordList = []
+    reused_by_key: GroupedRecords = {}
     new_count_by_key: dict[SegmentKey, int] = {}
 
     for key in keys:
@@ -161,23 +141,27 @@ def perform_attempt(
         if new_records
         else []
     )
-    new_detections_by_key = records_by_segment(new_detections)
+    new_detections_by_key = group_records_by_segment(new_detections)
     attempt_detections = {
-        key: (
-            reused_by_key[key]
-            + new_detections_by_key.get(key, [])
-        )
+        key: reused_by_key[key] + new_detections_by_key.get(key, [])
         for key in keys
     }
+    return target_by_key, attempt_detections, new_count_by_key
+
+
+def _resolve_attempt(
+    keys: list[SegmentKey],
+    detections_by_key: GroupedRecords,
+    config: PipelineConfig,
+) -> tuple[GroupedRecords, DiagnosticMap]:
     all_detections = [
         detection
         for key in keys
-        for detection in attempt_detections[key]
+        for detection in detections_by_key[key]
     ]
-
     try:
-        if all_detections:
-            resolved, diagnostics = resolve_all_lineups(
+        resolved, diagnostics = (
+            resolve_all_lineups(
                 pd.DataFrame(all_detections),
                 expected_players=config.players_per_lineup,
                 min_number_count=config.min_number_count,
@@ -185,8 +169,9 @@ def perform_attempt(
                 signature_threshold=config.signature_threshold,
                 enable_local_ocr=not config.disable_local_ocr,
             )
-        else:
-            resolved, diagnostics = [], []
+            if all_detections
+            else ([], [])
+        )
     except LineupResolutionError as exc:
         resolved = []
         diagnostics = [
@@ -200,11 +185,26 @@ def perform_attempt(
             }
             for key in keys
         ]
+    return (
+        _records_for_keys(resolved, keys),
+        _diagnostics_for_keys(diagnostics, keys),
+    )
 
-    resolved_by_key = _records_for_keys(resolved, keys)
-    diagnostics_by_key = _diagnostics_for_keys(diagnostics, keys)
+
+def _evaluate_attempt(
+    *,
+    keys: list[SegmentKey],
+    attempt: int,
+    tier: str,
+    target_by_key: GroupedRecords,
+    detections_by_key: GroupedRecords,
+    new_count_by_key: dict[SegmentKey, int],
+    resolved_by_key: GroupedRecords,
+    diagnostics_by_key: DiagnosticMap,
+    config: PipelineConfig,
+) -> tuple[dict[SegmentKey, QualityResult], RecordList]:
     quality: dict[SegmentKey, QualityResult] = {}
-    attempt_rows: list[dict[str, object]] = []
+    attempt_rows: RecordList = []
     for key in keys:
         diagnostic = diagnostics_by_key[key] or None
         result = evaluate_segment_quality(
@@ -227,7 +227,7 @@ def perform_attempt(
                 "tier": tier,
                 "frame_count": len(target_by_key[key]),
                 "new_ocr_frame_count": new_count_by_key[key],
-                "detection_count": len(attempt_detections[key]),
+                "detection_count": len(detections_by_key[key]),
                 "resolver_status": resolver_status,
                 "resolved_players": result.resolved_players,
                 "quality_pass": result.passed,
@@ -239,11 +239,51 @@ def perform_attempt(
             f"  {key[0]}, segment {key[1]}: {state} - "
             f"{result.message}"
         )
+    return quality, attempt_rows
 
+
+def perform_attempt(
+    *,
+    keys: list[SegmentKey],
+    attempt: int,
+    tier: str,
+    target_records: RecordList,
+    previous_records: GroupedRecords,
+    previous_detections: GroupedRecords,
+    ocr: object,
+    config: PipelineConfig,
+) -> AttemptOutcome:
+    target_by_key, detections_by_key, new_count_by_key = (
+        _run_attempt_ocr(
+            keys=keys,
+            tier=tier,
+            target_records=target_records,
+            previous_records=previous_records,
+            previous_detections=previous_detections,
+            ocr=ocr,
+            config=config,
+        )
+    )
+    resolved_by_key, diagnostics_by_key = _resolve_attempt(
+        keys,
+        detections_by_key,
+        config,
+    )
+    quality, attempt_rows = _evaluate_attempt(
+        keys=keys,
+        attempt=attempt,
+        tier=tier,
+        target_by_key=target_by_key,
+        detections_by_key=detections_by_key,
+        new_count_by_key=new_count_by_key,
+        resolved_by_key=resolved_by_key,
+        diagnostics_by_key=diagnostics_by_key,
+        config=config,
+    )
     return AttemptOutcome(
         tier=tier,
         frame_records=target_by_key,
-        detections=attempt_detections,
+        detections=detections_by_key,
         resolved_records=resolved_by_key,
         diagnostics=diagnostics_by_key,
         quality=quality,
@@ -252,9 +292,9 @@ def perform_attempt(
 
 
 def full_segment_records(
-    records: list[dict[str, object]],
-) -> list[dict[str, object]]:
-    prepared: list[dict[str, object]] = []
+    records: RecordList,
+) -> RecordList:
+    prepared: RecordList = []
     for record in records:
         prepared_record = dict(record)
         prepared_record.update(
@@ -273,7 +313,7 @@ def full_segment_records(
 
 
 def full_segment_selection(
-    records: list[dict[str, object]],
+    records: RecordList,
     message: str,
 ) -> SegmentSelection:
     first = min(records, key=lambda row: float(row["timestamp_seconds"]))
@@ -317,7 +357,7 @@ def final_diagnostic(
     diagnostic: dict[str, object],
     quality: QualityResult,
     tier: str,
-) -> dict[str, object]:
+) -> Record:
     original_message = str(diagnostic.get("message", "")).strip()
     quality_message = (
         f"quality gate passed at {tier}: {quality.message}"

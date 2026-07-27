@@ -1,121 +1,47 @@
-"""Composable lineup-resolution building blocks."""
+"""Public API for lineup resolution."""
 
 from .common import (
-    IGNORED_TEXT,
-    IGNORED_TEXT_MARKERS,
-    PROJECT_ROOT,
-    REQUIRED_COLUMNS,
-    TABLE_IGNORED_TEXT,
     FormationEvent,
     LineupResolutionError,
-    NumberCluster,
     PairObservation,
-    consensus_text,
-    detections_before_substitutes,
     detections_without_substitute_panel,
     is_name_like,
-    is_table_name_like,
-    load_detections,
-    normalize_text,
-    parse_inline_player,
-    resolve_project_path,
-    shirt_number_rows,
-    similarity,
-    spatial_distance,
 )
 from .formation import (
     attempt_formation_resolution,
-    best_full_name,
-    cluster_number_consensus,
-    cluster_number_positions,
-    detect_formation_events,
-    formation_rows,
-    nearby_formation_labels,
-    resolve_event,
-    select_player_clusters,
-    signature_similarity,
     validate_unique_shirt_numbers,
 )
 from .layout import (
     formation_anchor_pairs,
     formation_name_rows,
     formation_number_gap,
-    formation_refinement_frames,
 )
-from .formation_refinement import refine_formation_numbers
-from .local_models import (
-    create_local_number_recognizer,
-    create_local_table_ocr,
-    local_result_data,
-)
+from .local_models import numeric_candidate_consensus
 from .pipeline import resolve_all_lineups
-from .quality import (
-    UI_NAME_TOKENS,
-    QualityResult,
-    evaluate_segment_quality,
-)
-from .schema import DIAGNOSTIC_COLUMNS, RESOLVED_COLUMNS
-from .table import (
-    group_pair_observations,
-    resolve_table_layout,
-    select_table_pairs,
-    table_pair_observations,
-    table_rows_for_frame,
-)
-from .table_refinement import refine_table_numbers
+from .player_names import best_full_name
+from .quality import QualityResult, evaluate_segment_quality
+from .table import select_table_pairs, table_rows_for_frame
+from ..schema import DIAGNOSTIC_COLUMNS, RESOLVED_COLUMNS
 
 
 __all__ = [
-    "IGNORED_TEXT",
-    "IGNORED_TEXT_MARKERS",
-    "PROJECT_ROOT",
-    "REQUIRED_COLUMNS",
-    "TABLE_IGNORED_TEXT",
-    "FormationEvent",
     "DIAGNOSTIC_COLUMNS",
+    "FormationEvent",
     "LineupResolutionError",
-    "NumberCluster",
     "PairObservation",
     "QualityResult",
     "RESOLVED_COLUMNS",
-    "UI_NAME_TOKENS",
     "attempt_formation_resolution",
     "best_full_name",
-    "cluster_number_consensus",
-    "cluster_number_positions",
-    "consensus_text",
-    "create_local_number_recognizer",
-    "create_local_table_ocr",
-    "detect_formation_events",
-    "detections_before_substitutes",
     "detections_without_substitute_panel",
+    "evaluate_segment_quality",
     "formation_anchor_pairs",
     "formation_name_rows",
     "formation_number_gap",
-    "formation_refinement_frames",
-    "formation_rows",
-    "group_pair_observations",
     "is_name_like",
-    "is_table_name_like",
-    "load_detections",
-    "local_result_data",
-    "nearby_formation_labels",
-    "normalize_text",
-    "parse_inline_player",
-    "refine_formation_numbers",
-    "refine_table_numbers",
-    "evaluate_segment_quality",
+    "numeric_candidate_consensus",
     "resolve_all_lineups",
-    "resolve_event",
-    "resolve_project_path",
-    "resolve_table_layout",
-    "select_player_clusters",
     "select_table_pairs",
-    "shirt_number_rows",
-    "signature_similarity",
-    "similarity",
-    "spatial_distance",
-    "table_pair_observations",
     "table_rows_for_frame",
     "validate_unique_shirt_numbers",
 ]

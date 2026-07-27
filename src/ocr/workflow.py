@@ -7,34 +7,38 @@ from dataclasses import dataclass, field
 import pandas as pd
 
 from .attempts import (
-    ATTEMPT_COLUMNS,
     AttemptOutcome,
-    SegmentKey,
     filter_records_by_keys,
     final_diagnostic,
     full_segment_records,
     full_segment_selection,
     perform_attempt,
-    records_by_segment,
     selection_maps,
 )
 from .config import PipelineConfig
 from .frames import (
-    FRAME_COLUMNS,
     LineupOCRError,
+    SegmentKey,
     extract_segment_frames,
+    group_records_by_segment,
     load_segments,
 )
 from .ocr_engine import (
-    DETECTION_COLUMNS,
     create_ocr,
     run_ocr,
     write_csv,
 )
 from .resolver import (
-    DIAGNOSTIC_COLUMNS,
-    RESOLVED_COLUMNS,
     QualityResult,
+)
+from .schema import (
+    ATTEMPT_COLUMNS,
+    DETECTION_COLUMNS,
+    DIAGNOSTIC_COLUMNS,
+    FRAME_COLUMNS,
+    RESOLVED_COLUMNS,
+    SELECTED_FRAME_COLUMNS,
+    SELECTION_DIAGNOSTIC_COLUMNS,
 )
 from .selector import (
     SegmentSelection,
@@ -42,8 +46,6 @@ from .selector import (
     select_segment_frames,
 )
 from .selection_io import (
-    SELECTED_FRAME_COLUMNS,
-    SELECTION_DIAGNOSTIC_COLUMNS,
     materialize_selected_frames,
     selection_diagnostic_rows,
 )
@@ -119,7 +121,7 @@ class LineupWorkflow:
             raise LineupOCRError("No lineup frames were extracted.")
 
         self.state = WorkflowState(
-            ordered_keys=list(records_by_segment(self.frames))
+            ordered_keys=list(group_records_by_segment(self.frames))
         )
         self.scout, self.ocr = self._run_scout()
 
@@ -249,7 +251,9 @@ class LineupWorkflow:
                 "Using the complete 2 FPS segment after "
                 "selection or quality fallback.",
             )
-            for key, records in records_by_segment(source_frames).items()
+            for key, records in group_records_by_segment(
+                source_frames
+            ).items()
         }
         ordered_keys = [
             key for key in state.ordered_keys if key in keys

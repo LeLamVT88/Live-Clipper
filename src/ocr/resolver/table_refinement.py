@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
 
 from .common import (
-    LineupResolutionError,
     PairObservation,
-    resolve_project_path,
 )
-from .local_models import local_result_data
+from .local_models import (
+    PIXEL_GEOMETRY_COLUMNS,
+    append_refinement_rows,
+    load_frame_image,
+    local_result_data,
+    numeric_observation,
+    require_cv2,
+)
 from .table import table_pair_observations, table_rows_for_frame
 
 
@@ -57,12 +60,8 @@ def refine_table_numbers(
         if len(chosen) == 3:
             break
 
-    try:
-        import cv2
-    except ModuleNotFoundError as exc:
-        raise LineupResolutionError(
-            "OpenCV is required for local table OCR."
-        ) from exc
+    cv2 = require_cv2("table")
+    include_pixels = PIXEL_GEOMETRY_COLUMNS.issubset(segment.columns)
 
     added_rows: list[dict[str, object]] = []
     for frame_index, frame_observations in chosen:
@@ -75,12 +74,10 @@ def refine_table_numbers(
         if len(rows) != expected_players:
             continue
 
-        frame_path = resolve_project_path(
-            Path(str(frame["frame_path"].iloc[0]))
+        image = load_frame_image(
+            frame["frame_path"].iloc[0],
+            cv2,
         )
-        if not frame_path.is_file():
-            continue
-        image = cv2.imread(str(frame_path))
         if image is None:
             continue
         height, width = image.shape[:2]
@@ -156,70 +153,20 @@ def refine_table_numbers(
                 numeric,
                 key=lambda item: item[1],
             )
-            output_row = name_row.to_dict()
             center_y = float(name_row["center_y_norm"])
-            output_row.update(
-                {
-                    "text": str(shirt_number),
-                    "text_type": "shirt_number_candidate",
-                    "score": round(score, 6),
-                    "center_x_norm": round(
-                        number_center_x,
-                        6,
-                    ),
-                    "center_y_norm": round(center_y, 6),
-                }
-            )
-            if {
-                "x1",
-                "x2",
-                "y1",
-                "y2",
-                "center_x",
-                "center_y",
-            }.issubset(segment.columns):
-                center_x_pixels = number_center_x * width
-                center_y_pixels = center_y * height
-                output_row.update(
-                    {
-                        "x1": int(
-                            round(center_x_pixels - 20)
-                        ),
-                        "x2": int(
-                            round(center_x_pixels + 20)
-                        ),
-                        "y1": int(
-                            round(
-                                center_y_pixels - half_height
-                            )
-                        ),
-                        "y2": int(
-                            round(
-                                center_y_pixels + half_height
-                            )
-                        ),
-                        "center_x": round(
-                            center_x_pixels,
-                            3,
-                        ),
-                        "center_y": round(
-                            center_y_pixels,
-                            3,
-                        ),
-                    }
+            added_rows.append(
+                numeric_observation(
+                    name_row,
+                    shirt_number=shirt_number,
+                    score=score,
+                    center_x=number_center_x,
+                    center_y=center_y,
+                    image_width=width,
+                    image_height=height,
+                    half_width=20,
+                    half_height=half_height,
+                    include_pixel_geometry=include_pixels,
                 )
-            added_rows.append(output_row)
+            )
 
-    if not added_rows:
-        return segment, 0
-    refined = pd.concat(
-        [
-            segment,
-            pd.DataFrame(
-                added_rows,
-                columns=segment.columns,
-            ),
-        ],
-        ignore_index=True,
-    )
-    return refined, len(added_rows)
+    return append_refinement_rows(segment, added_rows)

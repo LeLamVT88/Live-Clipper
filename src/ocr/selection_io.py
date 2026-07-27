@@ -7,51 +7,14 @@ from pathlib import Path
 import cv2
 
 from .frames import PROJECT_ROOT, relative_to_project
+from .schema import (
+    SELECTED_FRAME_COLUMNS,
+    SELECTION_DIAGNOSTIC_COLUMNS,
+)
 from .selector import (
     LineupFrameSelectionError,
     SegmentSelection,
 )
-
-
-SELECTED_FRAME_COLUMNS = [
-    "video",
-    "segment_index",
-    "segment_label",
-    "segment_start_seconds",
-    "segment_end_seconds",
-    "frame_index",
-    "frame_path",
-    "timestamp",
-    "timestamp_seconds",
-    "relative_seconds",
-    "frame_width",
-    "frame_height",
-    "source_frame_path",
-    "selection_layout",
-    "selection_score",
-    "scout_frame_index",
-    "crop_side",
-    "crop_x1_norm",
-    "crop_x2_norm",
-]
-SELECTION_DIAGNOSTIC_COLUMNS = [
-    "video",
-    "segment_index",
-    "layout",
-    "status",
-    "score",
-    "scout_frame_index",
-    "scout_timestamp_seconds",
-    "formation_anchor_count",
-    "table_pair_count",
-    "number_count",
-    "name_count",
-    "crop_side",
-    "crop_x1_norm",
-    "crop_x2_norm",
-    "selected_frame_indices",
-    "message",
-]
 
 
 def materialize_selected_frames(

@@ -7,24 +7,12 @@ from pathlib import Path
 
 import pandas as pd
 
-from .frames import FRAME_COLUMNS, LineupOCRError, resolve_project_path
+from .frames import LineupOCRError, resolve_project_path
+from .schema import DETECTION_COLUMNS
 
 
 DETECTION_MODEL = "PP-OCRv6_small_det"
 RECOGNITION_MODEL = "PP-OCRv6_small_rec"
-DETECTION_COLUMNS = FRAME_COLUMNS + [
-    "text",
-    "text_type",
-    "score",
-    "x1",
-    "y1",
-    "x2",
-    "y2",
-    "center_x",
-    "center_y",
-    "center_x_norm",
-    "center_y_norm",
-]
 
 
 def write_csv(

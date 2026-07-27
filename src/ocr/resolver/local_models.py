@@ -4,10 +4,26 @@ from __future__ import annotations
 
 import os
 from collections import defaultdict
+from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
-from .common import PROJECT_ROOT, LineupResolutionError
+from .common import (
+    PROJECT_ROOT,
+    LineupResolutionError,
+    resolve_project_path,
+)
+
+
+PIXEL_GEOMETRY_COLUMNS = {
+    "x1",
+    "x2",
+    "y1",
+    "y2",
+    "center_x",
+    "center_y",
+}
 
 
 def create_local_table_ocr():
@@ -54,6 +70,80 @@ def local_result_data(result: object) -> dict[str, object]:
             "Local PaddleOCR result does not contain a result object."
         )
     return data
+
+
+def require_cv2(purpose: str):
+    try:
+        import cv2
+    except ModuleNotFoundError as exc:
+        raise LineupResolutionError(
+            f"OpenCV is required for local {purpose} OCR."
+        ) from exc
+    return cv2
+
+
+def load_frame_image(
+    frame_path: object,
+    cv2: object,
+) -> np.ndarray | None:
+    path = resolve_project_path(Path(str(frame_path)))
+    if not path.is_file():
+        return None
+    return cv2.imread(str(path))
+
+
+def numeric_observation(
+    source_row: pd.Series,
+    *,
+    shirt_number: int,
+    score: float,
+    center_x: float,
+    center_y: float,
+    image_width: int,
+    image_height: int,
+    half_width: float,
+    half_height: float,
+    include_pixel_geometry: bool,
+) -> dict[str, object]:
+    output = source_row.to_dict()
+    output.update(
+        {
+            "text": str(shirt_number),
+            "text_type": "shirt_number_candidate",
+            "score": round(score, 6),
+            "center_x_norm": round(center_x, 6),
+            "center_y_norm": round(center_y, 6),
+        }
+    )
+    if not include_pixel_geometry:
+        return output
+
+    center_x_pixels = center_x * image_width
+    center_y_pixels = center_y * image_height
+    output.update(
+        {
+            "x1": int(round(center_x_pixels - half_width)),
+            "x2": int(round(center_x_pixels + half_width)),
+            "y1": int(round(center_y_pixels - half_height)),
+            "y2": int(round(center_y_pixels + half_height)),
+            "center_x": round(center_x_pixels, 3),
+            "center_y": round(center_y_pixels, 3),
+        }
+    )
+    return output
+
+
+def append_refinement_rows(
+    segment: pd.DataFrame,
+    rows: list[dict[str, object]],
+) -> tuple[pd.DataFrame, int]:
+    if not rows:
+        return segment, 0
+    refined = pd.concat(
+        [segment, pd.DataFrame(rows, columns=segment.columns)],
+        ignore_index=True,
+    )
+    return refined, len(rows)
 
 
 def numeric_detection(

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
 from dataclasses import dataclass
 
 import pandas as pd
 
+from .frames import group_records_by_segment
 from .resolver.common import (
     is_table_name_like,
     normalize_text,
@@ -82,10 +82,6 @@ class SegmentSelection:
         return "full"
 
 
-def segment_key(row: dict[str, object] | pd.Series) -> tuple[str, int]:
-    return str(row["video"]), int(row["segment_index"])
-
-
 def sample_scout_frames(
     frame_records: list[dict[str, object]],
     scout_fps: float,
@@ -94,9 +90,7 @@ def sample_scout_frames(
         raise LineupFrameSelectionError("scout_fps must be positive.")
 
     period_seconds = 1.0 / scout_fps
-    grouped: defaultdict[tuple[str, int], list[dict[str, object]]] = defaultdict(list)
-    for record in frame_records:
-        grouped[segment_key(record)].append(record)
+    grouped = group_records_by_segment(frame_records)
 
     selected: list[dict[str, object]] = []
     for records in grouped.values():
@@ -320,6 +314,89 @@ def choose_spread_frame_indices(
     return tuple(sorted(selected_indices))
 
 
+def fallback_selection(
+    key: tuple[str, int],
+    records: list[dict[str, object]],
+) -> SegmentSelection:
+    indices = tuple(
+        sorted(int(record["frame_index"]) for record in records)
+    )
+    first_timestamp = min(
+        float(record["timestamp_seconds"]) for record in records
+    )
+    return SegmentSelection(
+        video=key[0],
+        segment_index=key[1],
+        layout="fallback_full_segment",
+        status="fallback",
+        score=0.0,
+        scout_frame_index=0,
+        scout_timestamp_seconds=first_timestamp,
+        formation_anchor_count=0,
+        table_pair_count=0,
+        number_count=0,
+        name_count=0,
+        crop_x1_norm=0.0,
+        crop_x2_norm=1.0,
+        selected_frame_indices=indices,
+        message=(
+            "No complete formation/list candidate found in scout OCR; "
+            "using legacy full-segment OCR."
+        ),
+    )
+
+
+def stable_candidate_score(
+    candidate: FrameCandidate,
+    candidates: list[FrameCandidate],
+    scout_period: float,
+) -> tuple[float, float, int]:
+    neighbors = sum(
+        1
+        for other in candidates
+        if (
+            other.layout == candidate.layout
+            and abs(
+                other.timestamp_seconds - candidate.timestamp_seconds
+            )
+            <= 2.1 * scout_period
+        )
+    )
+    return (
+        candidate.score + 3 * min(neighbors, 4),
+        candidate.timestamp_seconds,
+        candidate.frame_index,
+    )
+
+
+def selected_candidate(
+    best: FrameCandidate,
+    selected_indices: tuple[int, ...],
+    stable_score: float,
+) -> SegmentSelection:
+    return SegmentSelection(
+        video=best.video,
+        segment_index=best.segment_index,
+        layout=best.layout,
+        status="selected",
+        score=stable_score,
+        scout_frame_index=best.frame_index,
+        scout_timestamp_seconds=best.timestamp_seconds,
+        formation_anchor_count=best.formation_anchor_count,
+        table_pair_count=best.table_pair_count,
+        number_count=best.number_count,
+        name_count=best.name_count,
+        crop_x1_norm=best.crop_x1_norm,
+        crop_x2_norm=best.crop_x2_norm,
+        selected_frame_indices=selected_indices,
+        message=(
+            f"Selected {len(selected_indices)} detailed OCR frame(s) "
+            f"across the stable scene containing scout frame "
+            f"{best.frame_index}."
+        ),
+    )
+
+
 def select_segment_frames(
     frame_records: list[dict[str, object]],
     scout_detections: pd.DataFrame,
@@ -333,11 +410,7 @@ def select_segment_frames(
     if scout_fps <= 0:
         raise LineupFrameSelectionError("scout_fps must be positive.")
 
-    records_by_segment: defaultdict[
-        tuple[str, int], list[dict[str, object]]
-    ] = defaultdict(list)
-    for record in frame_records:
-        records_by_segment[segment_key(record)].append(record)
+    records_by_segment = group_records_by_segment(frame_records)
 
     detections_by_segment = (
         {
@@ -367,55 +440,17 @@ def select_segment_frames(
                     candidates.append(candidate)
 
         if not candidates:
-            all_indices = tuple(
-                sorted(int(record["frame_index"]) for record in segment_records)
-            )
             selections.append(
-                SegmentSelection(
-                    video=key[0],
-                    segment_index=key[1],
-                    layout="fallback_full_segment",
-                    status="fallback",
-                    score=0.0,
-                    scout_frame_index=0,
-                    scout_timestamp_seconds=float(
-                        min(
-                            float(record["timestamp_seconds"])
-                            for record in segment_records
-                        )
-                    ),
-                    formation_anchor_count=0,
-                    table_pair_count=0,
-                    number_count=0,
-                    name_count=0,
-                    crop_x1_norm=0.0,
-                    crop_x2_norm=1.0,
-                    selected_frame_indices=all_indices,
-                    message=(
-                        "No complete formation/list candidate found in scout OCR; "
-                        "using legacy full-segment OCR."
-                    ),
-                )
+                fallback_selection(key, segment_records)
             )
             continue
 
-        def stable_score(candidate: FrameCandidate) -> tuple[float, float, int]:
-            neighbors = sum(
-                1
-                for other in candidates
-                if (
-                    other.layout == candidate.layout
-                    and abs(other.timestamp_seconds - candidate.timestamp_seconds)
-                    <= 2.1 * scout_period
-                )
-            )
-            return (
-                candidate.score + 3 * min(neighbors, 4),
-                candidate.timestamp_seconds,
-                candidate.frame_index,
-            )
-
-        best = max(candidates, key=stable_score)
+        score = lambda candidate: stable_candidate_score(
+            candidate,
+            candidates,
+            scout_period,
+        )
+        best = max(candidates, key=score)
         selected_indices = choose_spread_frame_indices(
             segment_records,
             candidates=candidates,
@@ -424,28 +459,11 @@ def select_segment_frames(
             scout_period_seconds=scout_period,
         )
         selections.append(
-            SegmentSelection(
-                video=best.video,
-                segment_index=best.segment_index,
-                layout=best.layout,
-                status="selected",
-                score=stable_score(best)[0],
-                scout_frame_index=best.frame_index,
-                scout_timestamp_seconds=best.timestamp_seconds,
-                formation_anchor_count=best.formation_anchor_count,
-                table_pair_count=best.table_pair_count,
-                number_count=best.number_count,
-                name_count=best.name_count,
-                crop_x1_norm=best.crop_x1_norm,
-                crop_x2_norm=best.crop_x2_norm,
-                selected_frame_indices=selected_indices,
-                message=(
-                    f"Selected {len(selected_indices)} detailed OCR frame(s) "
-                    f"across the stable scene containing scout frame "
-                    f"{best.frame_index}."
-                ),
+            selected_candidate(
+                best,
+                selected_indices,
+                stable_score=score(best)[0],
             )
         )
 
     return selections
-

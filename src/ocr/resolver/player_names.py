@@ -16,49 +16,47 @@ from .common import (
 )
 
 
-def best_full_name(
+NameCandidate = tuple[str, float, int]
+
+
+def label_occurrences(
     formation_label: str,
-    event_detections: pd.DataFrame,
-    other_formation_labels: set[str],
-) -> tuple[str, float, int]:
-    candidates: list[tuple[str, float, int]] = []
-    label_normalized = normalize_text(formation_label)
-    label_occurrences = event_detections[
-        event_detections.apply(
+    detections: pd.DataFrame,
+) -> pd.DataFrame:
+    return detections[
+        detections.apply(
             lambda row: (
-                row["text_type"]
-                != "shirt_number_candidate"
-                and similarity(
-                    row["text"],
-                    formation_label,
-                )
-                >= 0.82
+                row["text_type"] != "shirt_number_candidate"
+                and similarity(row["text"], formation_label) >= 0.82
             ),
             axis=1,
         )
     ]
 
-    for _, label_row in label_occurrences.iterrows():
+
+def nearby_name_candidates(
+    formation_label: str,
+    occurrences: pd.DataFrame,
+    detections: pd.DataFrame,
+    other_labels: set[str],
+) -> list[NameCandidate]:
+    candidates: list[NameCandidate] = []
+    label_normalized = normalize_text(formation_label)
+
+    for _, label_row in occurrences.iterrows():
         frame_index = int(label_row["frame_index"])
-        frame = event_detections[
-            (
-                event_detections["frame_index"]
-                == frame_index
-            )
-            & (
-                event_detections["text_type"]
-                != "shirt_number_candidate"
-            )
+        frame = detections[
+            (detections["frame_index"] == frame_index)
+            & (detections["text_type"] != "shirt_number_candidate")
         ]
         neighbors: list[tuple[float, pd.Series]] = []
         for _, row in frame.iterrows():
-            text = str(row["text"])
-            normalized = normalize_text(text)
+            normalized = normalize_text(row["text"])
             if normalized == normalize_text(label_row["text"]):
                 continue
             if (
-                not is_name_like(text)
-                or normalized in other_formation_labels
+                not is_name_like(row["text"])
+                or normalized in other_labels
             ):
                 continue
             dx = abs(
@@ -74,10 +72,7 @@ def best_full_name(
 
         if not neighbors:
             continue
-        neighbor = min(
-            neighbors,
-            key=lambda item: item[0],
-        )[1]
+        neighbor = min(neighbors, key=lambda item: item[0])[1]
         ordered = sorted(
             [label_row, neighbor],
             key=lambda row: (
@@ -86,24 +81,33 @@ def best_full_name(
             ),
         )
         combined = " ".join(
-            str(row["text"]).strip()
-            for row in ordered
+            str(row["text"]).strip() for row in ordered
         )
         combined_normalized = normalize_text(combined)
-        if label_normalized not in combined_normalized:
-            continue
-        if len(combined_normalized.split()) > 6:
+        if (
+            label_normalized not in combined_normalized
+            or len(combined_normalized.split()) > 6
+        ):
             continue
         candidates.append(
             (
                 combined,
-                float(label_row["score"])
-                * float(neighbor["score"]),
+                float(label_row["score"]) * float(neighbor["score"]),
                 frame_index,
             )
         )
+    return candidates
 
-    for frame_index, frame in event_detections.groupby(
+
+def multiline_name_candidates(
+    formation_label: str,
+    detections: pd.DataFrame,
+    other_labels: set[str],
+) -> list[NameCandidate]:
+    candidates: list[NameCandidate] = []
+    label_normalized = normalize_text(formation_label)
+
+    for frame_index, frame in detections.groupby(
         "frame_index",
         sort=False,
     ):
@@ -111,71 +115,33 @@ def best_full_name(
             row
             for _, row in frame.iterrows()
             if (
-                row["text_type"]
-                != "shirt_number_candidate"
+                row["text_type"] != "shirt_number_candidate"
                 and is_name_like(row["text"])
                 and (
-                    normalize_text(row["text"])
-                    not in other_formation_labels
-                    or similarity(
-                        row["text"],
-                        formation_label,
-                    )
-                    >= 0.82
+                    normalize_text(row["text"]) not in other_labels
+                    or similarity(row["text"], formation_label) >= 0.82
                 )
             )
         ]
         for group_size in (2, 3):
-            for rows in combinations(
-                name_rows,
-                group_size,
-            ):
-                x_values = [
-                    float(row["center_x_norm"])
-                    for row in rows
-                ]
-                y_values = [
-                    float(row["center_y_norm"])
-                    for row in rows
-                ]
-                if max(x_values) - min(x_values) > 0.065:
+            for rows in combinations(name_rows, group_size):
+                if not rows_form_name(rows):
                     continue
                 ordered = sorted(
                     rows,
-                    key=lambda row: float(
-                        row["center_y_norm"]
-                    ),
-                )
-                ordered_y = [
-                    float(row["center_y_norm"])
-                    for row in ordered
-                ]
-                if ordered_y[-1] - ordered_y[0] > 0.14:
-                    continue
-                if any(
-                    right - left > 0.09
-                    for left, right in zip(
-                        ordered_y,
-                        ordered_y[1:],
-                    )
-                ):
-                    continue
-
-                combined = " ".join(
-                    str(row["text"]).strip()
-                    for row in ordered
+                    key=lambda row: float(row["center_y_norm"]),
                 )
                 combined = re.sub(
                     r"\s*-\s*",
                     "-",
-                    combined,
+                    " ".join(
+                        str(row["text"]).strip() for row in ordered
+                    ),
                 )
                 combined_normalized = normalize_text(combined)
-                if label_normalized not in combined_normalized:
-                    continue
                 if (
-                    len(combined_normalized)
-                    <= len(label_normalized)
+                    label_normalized not in combined_normalized
+                    or len(combined_normalized) <= len(label_normalized)
                 ):
                     continue
                 candidates.append(
@@ -183,40 +149,72 @@ def best_full_name(
                         combined,
                         float(
                             np.mean(
-                                [
-                                    float(row["score"])
-                                    for row in ordered
-                                ]
+                                [float(row["score"]) for row in ordered]
                             )
                         ),
                         int(frame_index),
                     )
                 )
+    return candidates
 
-    deduplicated: dict[
-        tuple[int, str],
-        tuple[str, float, int],
-    ] = {}
-    for candidate in candidates:
-        key = (
-            candidate[2],
-            normalize_text(candidate[0]),
+
+def rows_form_name(rows: tuple[pd.Series, ...]) -> bool:
+    x_values = [float(row["center_x_norm"]) for row in rows]
+    if max(x_values) - min(x_values) > 0.065:
+        return False
+
+    y_values = sorted(float(row["center_y_norm"]) for row in rows)
+    return (
+        y_values[-1] - y_values[0] <= 0.14
+        and all(
+            right - left <= 0.09
+            for left, right in zip(y_values, y_values[1:])
         )
+    )
+
+
+def deduplicate_candidates(
+    candidates: list[NameCandidate],
+) -> list[NameCandidate]:
+    deduplicated: dict[tuple[int, str], NameCandidate] = {}
+    for candidate in candidates:
+        key = (candidate[2], normalize_text(candidate[0]))
         existing = deduplicated.get(key)
         if existing is None or candidate[1] > existing[1]:
             deduplicated[key] = candidate
-    candidates = list(deduplicated.values())
+    return list(deduplicated.values())
+
+
+def best_full_name(
+    formation_label: str,
+    event_detections: pd.DataFrame,
+    other_formation_labels: set[str],
+) -> tuple[str, float, int]:
+    occurrences = label_occurrences(
+        formation_label,
+        event_detections,
+    )
+    candidates = deduplicate_candidates(
+        nearby_name_candidates(
+            formation_label,
+            occurrences,
+            event_detections,
+            other_formation_labels,
+        )
+        + multiline_name_candidates(
+            formation_label,
+            event_detections,
+            other_formation_labels,
+        )
+    )
 
     if not candidates:
-        fallback = label_occurrences
         confidence = (
-            float(fallback["score"].mean())
-            if not fallback.empty
+            float(occurrences["score"].mean())
+            if not occurrences.empty
             else 0.0
         )
-        evidence = int(
-            fallback["frame_index"].nunique()
-        )
+        evidence = int(occurrences["frame_index"].nunique())
         return formation_label, confidence, evidence
 
     full_name, confidence, evidence = consensus_text(
@@ -225,7 +223,7 @@ def best_full_name(
     )
     if (
         len(normalize_text(full_name))
-        <= len(label_normalized)
+        <= len(normalize_text(formation_label))
     ):
         return formation_label, confidence, evidence
     return full_name, confidence, evidence

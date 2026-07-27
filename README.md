@@ -41,6 +41,7 @@ live-clipper/
 │       ├── attempts.py     # chạy OCR/resolve một lần thử
 │       ├── frames.py       # đọc segment và tách frame
 │       ├── ocr_engine.py   # adapter PaddleOCR
+│       ├── schema.py       # định dạng cột CSV dùng chung
 │       ├── selector.py     # chấm điểm và chọn frame lineup
 │       ├── selection_io.py # crop frame và ghi diagnostics
 │       └── resolver/
@@ -53,7 +54,6 @@ live-clipper/
 │           ├── player_names.py
 │           ├── local_models.py
 │           ├── quality.py
-│           ├── schema.py
 │           └── pipeline.py
 ├── .gitignore
 ├── README.md
