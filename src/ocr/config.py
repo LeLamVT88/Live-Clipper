@@ -125,21 +125,7 @@ def build_parser() -> argparse.ArgumentParser:
             "the complete 2 FPS segment when the quality gate fails."
         )
     )
-    for name in (
-        "segments_csv",
-        "video_dir",
-        "frames_dir",
-        "selected_frames_dir",
-        "frames_csv",
-        "scout_output_csv",
-        "selected_frames_csv",
-        "selection_diagnostics_csv",
-        "output_csv",
-        "resolved_output_csv",
-        "resolved_diagnostics_csv",
-        "attempts_csv",
-        "cache_dir",
-    ):
+    for name in DEFAULTS:
         parser.add_argument(
             f"--{name.replace('_', '-')}",
             type=Path,

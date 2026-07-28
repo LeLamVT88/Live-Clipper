@@ -137,6 +137,13 @@ class PairObservation:
     relation: str
 
 
+@dataclass(frozen=True)
+class SubstitutePanel:
+    side: str
+    boundary: float
+    first_timestamp_seconds: float
+
+
 def resolve_project_path(path: Path) -> Path:
     path = path.expanduser()
     return path.resolve() if path.is_absolute() else (PROJECT_ROOT / path).resolve()
@@ -197,6 +204,48 @@ def parse_inline_player(text: object) -> tuple[int, str] | None:
     return shirt_number, player_name
 
 
+def find_substitute_panel(
+    detections: pd.DataFrame,
+) -> SubstitutePanel | None:
+    if detections.empty:
+        return None
+    headers = detections[
+        detections["text"].map(normalize_text).str.contains(
+            r"\bsubstitutes?\b",
+            regex=True,
+            na=False,
+        )
+    ]
+    if headers.empty:
+        return None
+
+    left_headers = headers[headers["center_x_norm"] < 0.5]
+    right_headers = headers[headers["center_x_norm"] >= 0.5]
+    panel_headers = (
+        left_headers
+        if len(left_headers) >= len(right_headers)
+        else right_headers
+    )
+    side = (
+        "left"
+        if float(panel_headers["center_x_norm"].median()) < 0.5
+        else "right"
+    )
+    header_x = float(panel_headers["center_x_norm"].median())
+    boundary = (
+        min(0.5, header_x + 0.18)
+        if side == "left"
+        else max(0.5, header_x - 0.18)
+    )
+    return SubstitutePanel(
+        side=side,
+        boundary=boundary,
+        first_timestamp_seconds=float(
+            panel_headers["timestamp_seconds"].min()
+        ),
+    )
+
+
 def detections_before_substitutes(
     segment: pd.DataFrame,
 ) -> pd.DataFrame:
@@ -216,39 +265,17 @@ def detections_before_substitutes(
 def detections_without_substitute_panel(
     segment: pd.DataFrame,
 ) -> pd.DataFrame:
-    headers = segment[
-        segment["text"].map(normalize_text).str.contains(
-            r"\bsubstitutes?\b",
-            regex=True,
-            na=False,
-        )
-    ]
-    if headers.empty:
+    panel = find_substitute_panel(segment)
+    if panel is None:
         return segment
 
-    left_headers = headers[headers["center_x_norm"] < 0.5]
-    right_headers = headers[headers["center_x_norm"] >= 0.5]
-    panel_headers = (
-        left_headers
-        if len(left_headers) >= len(right_headers)
-        else right_headers
+    panel_frames = (
+        segment["timestamp_seconds"] >= panel.first_timestamp_seconds
     )
-    panel_is_left = float(panel_headers["center_x_norm"].median()) < 0.5
-    header_x = float(panel_headers["center_x_norm"].median())
-    first_panel_timestamp = float(
-        panel_headers["timestamp_seconds"].min()
-    )
-    panel_boundary = (
-        min(0.5, header_x + 0.18)
-        if panel_is_left
-        else max(0.5, header_x - 0.18)
-    )
-
-    panel_frames = segment["timestamp_seconds"] >= first_panel_timestamp
     panel_side = (
-        segment["center_x_norm"] < panel_boundary
-        if panel_is_left
-        else segment["center_x_norm"] > panel_boundary
+        segment["center_x_norm"] < panel.boundary
+        if panel.side == "left"
+        else segment["center_x_norm"] > panel.boundary
     )
     return segment[~(panel_frames & panel_side)]
 

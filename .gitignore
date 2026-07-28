@@ -24,7 +24,7 @@ data/ocr_selected_frames/*
 !data/ocr_selected_frames/.gitkeep
 
 data/ocr_samples/
-
+data/data_test/*
 data/processed/*
 !data/processed/.gitkeep
 
@@ -38,3 +38,4 @@ outputs/predictions/ocr/*
 
 outputs/clips/*
 !outputs/clips/.gitkeep
+outputs/runs/*

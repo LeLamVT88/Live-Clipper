@@ -13,7 +13,7 @@ from .local_models import (
     PIXEL_GEOMETRY_COLUMNS,
     append_refinement_rows,
     load_frame_image,
-    local_result_data,
+    numeric_detection,
     numeric_observation,
     require_cv2,
 )
@@ -133,26 +133,10 @@ def refine_table_numbers(
         if len(results) != len(rows):
             continue
         for name_row, result in zip(rows, results, strict=True):
-            data = local_result_data(result)
-            texts = data.get("rec_texts", [])
-            scores = data.get("rec_scores", [])
-            numeric = [
-                (int(str(text).strip()), float(score))
-                for text, score in zip(
-                    texts,
-                    scores,
-                    strict=False,
-                )
-                if str(text).strip().isdigit()
-                and 1 <= int(str(text).strip()) <= 99
-                and float(score) >= 0.60
-            ]
-            if not numeric:
+            numeric = numeric_detection(result, minimum_score=0.60)
+            if numeric is None:
                 continue
-            shirt_number, score = max(
-                numeric,
-                key=lambda item: item[1],
-            )
+            shirt_number, score = numeric
             center_y = float(name_row["center_y_norm"])
             added_rows.append(
                 numeric_observation(

@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import math
-import re
-import unicodedata
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,8 +11,7 @@ from typing import Any, Iterable
 import cv2
 import pandas as pd
 
-from .schema import FRAME_COLUMNS
-
+from lineup.utils import safe_stem
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SegmentKey = tuple[str, int]
@@ -60,13 +57,6 @@ def relative_to_project(path: Path) -> str:
         return path.resolve().relative_to(PROJECT_ROOT).as_posix()
     except ValueError:
         return path.resolve().as_posix()
-
-
-def safe_stem(value: str) -> str:
-    normalized = unicodedata.normalize("NFKD", value)
-    ascii_name = normalized.encode("ascii", "ignore").decode("ascii")
-    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", ascii_name).strip("._-")
-    return safe_name or "video"
 
 
 def seconds_to_timestamp(seconds: float) -> str:

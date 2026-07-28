@@ -20,7 +20,6 @@ from .resolver import (
     evaluate_segment_quality,
     resolve_all_lineups,
 )
-from .schema import ATTEMPT_COLUMNS
 from .selector import SegmentSelection
 
 

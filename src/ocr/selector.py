@@ -8,6 +8,8 @@ import pandas as pd
 
 from .frames import group_records_by_segment
 from .resolver.common import (
+    SubstitutePanel,
+    find_substitute_panel,
     is_table_name_like,
     normalize_text,
     parse_inline_player,
@@ -22,13 +24,6 @@ SEGMENT_KEY_COLUMNS = ["video", "segment_index"]
 
 class LineupFrameSelectionError(Exception):
     """Raised when selected lineup frames cannot be prepared."""
-
-
-@dataclass(frozen=True)
-class SubstitutePanel:
-    side: str
-    boundary: float
-    first_timestamp_seconds: float
 
 
 @dataclass(frozen=True)
@@ -103,41 +98,6 @@ def sample_scout_frames(
             selected.append(record)
             next_timestamp = timestamp + period_seconds
     return selected
-
-
-def find_substitute_panel(detections: pd.DataFrame) -> SubstitutePanel | None:
-    if detections.empty:
-        return None
-    headers = detections[
-        detections["text"].map(normalize_text).str.contains(
-            r"\bsubstitutes?\b",
-            regex=True,
-            na=False,
-        )
-    ]
-    if headers.empty:
-        return None
-
-    left_headers = headers[headers["center_x_norm"] < 0.5]
-    right_headers = headers[headers["center_x_norm"] >= 0.5]
-    panel_headers = (
-        left_headers
-        if len(left_headers) >= len(right_headers)
-        else right_headers
-    )
-    side = "left" if float(panel_headers["center_x_norm"].median()) < 0.5 else "right"
-    header_x = float(panel_headers["center_x_norm"].median())
-    margin = 0.18
-    boundary = (
-        min(0.5, header_x + margin)
-        if side == "left"
-        else max(0.5, header_x - margin)
-    )
-    return SubstitutePanel(
-        side=side,
-        boundary=boundary,
-        first_timestamp_seconds=float(panel_headers["timestamp_seconds"].min()),
-    )
 
 
 def crop_detections_to_formation(

@@ -83,6 +83,9 @@ class WorkflowState:
         self.active_frames.update(outcome.frame_records)
         self.active_detections.update(outcome.detections)
         self.attempt_rows.extend(outcome.attempt_rows)
+        # Keep the most recent selection even when the quality gate fails.
+        # Final diagnostics must still describe unresolved tier-3 segments.
+        self.final_selection.update(selections)
 
         failed: set[SegmentKey] = set()
         for key, quality in outcome.quality.items():
@@ -93,7 +96,6 @@ class WorkflowState:
             self.final_diagnostics[key] = outcome.diagnostics[key]
             self.final_quality[key] = quality
             self.final_tier[key] = outcome.tier
-            self.final_selection[key] = selections[key]
         return failed
 
     def keep_final_failures(self, outcome: AttemptOutcome) -> None:

@@ -15,7 +15,7 @@ from ocr.attempts import (
     AttemptOutcome,
     reusable_attempt_data,
 )
-from ocr.config import PipelineConfig
+from ocr.config import DEFAULTS, PipelineConfig, build_parser
 from ocr.resolver.quality import QualityResult, evaluate_segment_quality
 from ocr.selector import SegmentSelection
 from ocr.workflow import LineupWorkflow, WorkflowState
@@ -118,6 +118,14 @@ class QualityGateTests(unittest.TestCase):
         self.assertIn("resolver status", result.message)
 
 
+class PipelineConfigTests(unittest.TestCase):
+    def test_parser_exposes_every_configured_path(self) -> None:
+        args = build_parser().parse_args([])
+
+        for name in DEFAULTS:
+            self.assertTrue(hasattr(args, name), name)
+
+
 class AdaptiveFallbackTests(unittest.TestCase):
     def test_reuses_prior_frames_and_only_ocr_new_expansion(self) -> None:
         previous_records = [frame(index) for index in range(1, 4)]
@@ -196,6 +204,53 @@ class AdaptiveFallbackTests(unittest.TestCase):
             state.final_tier[passed_key],
             "tier1_selected_3",
         )
+
+    def test_failed_attempt_keeps_selection_for_final_diagnostics(self) -> None:
+        key = ("match.mp4", 1)
+        quality = QualityResult(False, 0, "still unresolved")
+        outcome = AttemptOutcome(
+            tier="tier3_full_2fps",
+            frame_records={key: [frame(1)]},
+            detections={key: []},
+            resolved_records={key: []},
+            diagnostics={
+                key: {
+                    "video": key[0],
+                    "segment_index": key[1],
+                    "status": "unresolved",
+                    "resolution_method": "",
+                    "resolved_players": 0,
+                    "message": "no complete lineup",
+                }
+            },
+            quality={key: quality},
+            attempt_rows=[],
+        )
+        selection = SegmentSelection(
+            video=key[0],
+            segment_index=key[1],
+            layout="fallback_full_segment",
+            status="fallback",
+            score=0.0,
+            scout_frame_index=0,
+            scout_timestamp_seconds=0.0,
+            formation_anchor_count=0,
+            table_pair_count=0,
+            number_count=0,
+            name_count=0,
+            crop_x1_norm=0.0,
+            crop_x2_norm=1.0,
+            selected_frame_indices=(1,),
+            message="full segment fallback",
+        )
+        state = WorkflowState([key])
+
+        failed = state.apply(outcome, {key: selection})
+        state.keep_final_failures(outcome)
+
+        self.assertEqual(failed, {key})
+        self.assertEqual(state.final_selection[key], selection)
+        self.assertEqual(state.final_quality[key], quality)
 
     def test_workflow_runs_three_seven_then_full_segment(self) -> None:
         key = ("match.mp4", 1)

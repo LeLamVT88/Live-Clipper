@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import argparse
-import re
 import shutil
 import subprocess
 import tempfile
-import unicodedata
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +13,7 @@ import pandas as pd
 from utils import (
     PROJECT_ROOT,
     ensure_dir,
+    lineup_clip_name,
     resolve_project_path,
     timestamp_to_seconds,
 )
@@ -70,22 +69,6 @@ def parse_args() -> argparse.Namespace:
         help="Replace clips that already exist.",
     )
     return parser.parse_args()
-
-
-def safe_stem(value: str) -> str:
-    normalized = unicodedata.normalize("NFKD", value)
-    ascii_name = normalized.encode("ascii", "ignore").decode("ascii")
-    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", ascii_name).strip("._-")
-    return safe_name or "video"
-
-
-def seconds_tag(value: float) -> str:
-    milliseconds = round(value * 1000)
-    hours, remainder = divmod(milliseconds, 3_600_000)
-    minutes, remainder = divmod(remainder, 60_000)
-    seconds, millis = divmod(remainder, 1000)
-    tag = f"{hours:02d}-{minutes:02d}-{seconds:02d}"
-    return f"{tag}-{millis:03d}" if millis else tag
 
 
 def load_segments(csv_path: Path) -> pd.DataFrame:
@@ -159,9 +142,11 @@ def build_jobs(
         clip_number = clip_numbers[video_key]
         start_seconds = float(row["_start_seconds"])
         end_seconds = float(row["_end_seconds"])
-        output_name = (
-            f"{safe_stem(source.stem)}_lineup_{clip_number:02d}_"
-            f"{seconds_tag(start_seconds)}_to_{seconds_tag(end_seconds)}.mp4"
+        output_name = lineup_clip_name(
+            source.stem,
+            clip_number,
+            start_seconds,
+            end_seconds,
         )
         jobs.append(
             ClipJob(

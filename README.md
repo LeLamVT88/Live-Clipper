@@ -284,7 +284,7 @@ Nếu muốn thử threshold khác, script sẽ ưu tiên `smoothed_score`:
 python src/lineup/aggregate.py --threshold 0.6
 ```
 
-### 4. Chạy toàn bộ pipeline lineup bằng một lệnh
+### 4. Chạy pipeline OCR trên file segment có sẵn
 
 Script đọc `lineup_segments.csv`, quay lại video gốc và chỉ tách frame trong
 các khoảng lineup. MobileNet vẫn chạy ở `0,5 FPS`; các frame ứng viên được
@@ -389,8 +389,7 @@ Các cột chính:
 
 ```csv
 lineup_index,resolution_method,shirt_number,formation_label,player_name,pair_confidence
-1,formation,1,Alisson,Alisson Becker,0.997292
-1,formation,17,Jones,Curtis Jones,0.999953
+1,formation,23,F. MENDY,F. MENDY,0.997292
 ```
 
 `resolution_method` cho biết kết quả đến từ `table`, `table+local_ocr`,

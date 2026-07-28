@@ -7,10 +7,6 @@ from pathlib import Path
 import cv2
 
 from .frames import PROJECT_ROOT, relative_to_project
-from .schema import (
-    SELECTED_FRAME_COLUMNS,
-    SELECTION_DIAGNOSTIC_COLUMNS,
-)
 from .selector import (
     LineupFrameSelectionError,
     SegmentSelection,

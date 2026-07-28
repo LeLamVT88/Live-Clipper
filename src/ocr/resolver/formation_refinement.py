@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from .common import (
+    LineupResolutionError,
     detections_without_substitute_panel,
 )
 from .layout import (
