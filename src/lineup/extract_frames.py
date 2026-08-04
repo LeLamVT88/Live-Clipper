@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 import cv2
@@ -46,6 +47,11 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_PROCESSED_DIR,
     )
     parser.add_argument("--metadata-csv", type=Path, default=DEFAULT_METADATA_CSV)
+    parser.add_argument(
+        "--skip-video-metadata",
+        action="store_true",
+        help="Only write --metadata-csv, without per-video metadata copies.",
+    )
     parser.add_argument("--jpeg-quality", type=int, default=95)
     parser.add_argument(
         "--video",
@@ -92,7 +98,7 @@ def list_videos(input_dir: Path) -> list[Path]:
 
     return sorted(
         path
-        for path in input_dir.iterdir()
+        for path in input_dir.rglob("*")
         if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS
     )
 
@@ -102,20 +108,44 @@ def select_videos(input_dir: Path, selected_names: list[str]) -> list[Path]:
     if not selected_names:
         return videos
 
-    by_name = {path.name: path for path in videos}
+    input_root = input_dir.resolve()
+    by_relative = {
+        path.resolve().relative_to(input_root).as_posix(): path
+        for path in videos
+    }
+    by_name: defaultdict[str, list[Path]] = defaultdict(list)
+    for path in videos:
+        by_name[path.name].append(path)
     selected_videos: list[Path] = []
     missing_names: list[str] = []
 
     for name in selected_names:
-        video_name = Path(name).name
-        video_path = by_name.get(video_name)
+        requested = Path(name).as_posix()
+        video_path = by_relative.get(requested)
+        matches = by_name.get(Path(requested).name, [])
+        if video_path is None and len(matches) == 1:
+            video_path = matches[0]
+        if video_path is None and len(matches) > 1:
+            choices = "\n".join(
+                f"- {path.resolve().relative_to(input_root).as_posix()}"
+                for path in matches
+            )
+            raise FrameExtractionError(
+                f"Video name is ambiguous: {name}\nUse one of:\n{choices}"
+            )
         if video_path is None:
-            missing_names.append(video_name)
-        else:
+            missing_names.append(requested)
+        elif video_path not in selected_videos:
             selected_videos.append(video_path)
 
     if missing_names:
-        available = "\n".join(f"- {path.name}" for path in videos) or "- none"
+        available = (
+            "\n".join(
+                f"- {path.resolve().relative_to(input_root).as_posix()}"
+                for path in videos
+            )
+            or "- none"
+        )
         raise FrameExtractionError(
             "Selected video file(s) not found in "
             f"{input_dir}:\n"
@@ -283,14 +313,25 @@ def main() -> int:
                 start_seconds=start_seconds,
                 end_seconds=end_seconds,
             )
+            relative_video = (
+                video_path.resolve()
+                .relative_to(args.input_dir.resolve())
+                .as_posix()
+            )
+            for record in video_records:
+                record["video"] = relative_video
             all_records.extend(video_records)
 
-            video_stem = get_video_name_without_ext(video_path)
-            video_metadata_csv = (
-                args.processed_dir / video_stem / "extracted_frames.csv"
-            )
-            write_metadata_csv(video_records, video_metadata_csv)
-            print(f"Video metadata saved to: {relative_to_project(video_metadata_csv)}")
+            if not args.skip_video_metadata:
+                video_stem = get_video_name_without_ext(video_path)
+                video_metadata_csv = (
+                    args.processed_dir / video_stem / "extracted_frames.csv"
+                )
+                write_metadata_csv(video_records, video_metadata_csv)
+                print(
+                    "Video metadata saved to: "
+                    f"{relative_to_project(video_metadata_csv)}"
+                )
 
         write_metadata_csv(all_records, args.metadata_csv)
 

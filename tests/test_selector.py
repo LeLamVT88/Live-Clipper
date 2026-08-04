@@ -171,38 +171,60 @@ class SegmentSelectionTests(unittest.TestCase):
         self.assertEqual(selections[0].status, "fallback")
         self.assertEqual(selections[0].selected_frame_indices, (1, 2, 3, 4))
 
-    def test_spreads_frames_across_stable_formation_scene(self) -> None:
+    def test_centers_three_and_seven_frames_on_best_candidate(self) -> None:
         records = [
             frame_record(index, (index - 1) * 0.5)
-            for index in range(1, 14)
-        ]
-        candidates = [
-            selector.FrameCandidate(
-                video="match.mp4",
-                segment_index=1,
-                frame_index=frame_index,
-                timestamp_seconds=timestamp,
-                layout="formation_substitutes_left",
-                score=50.0,
-                formation_anchor_count=5,
-                table_pair_count=0,
-                number_count=5,
-                name_count=11,
-                crop_x1_norm=0.35,
-                crop_x2_norm=1.0,
-            )
-            for frame_index, timestamp in [(1, 0.0), (5, 2.0), (9, 4.0), (13, 6.0)]
+            for index in range(1, 16)
         ]
 
-        selected = selector.choose_spread_frame_indices(
+        selected = selector.choose_centered_frame_indices(
             records,
-            candidates,
-            best=candidates[1],
+            best_frame_index=9,
             count=3,
-            scout_period_seconds=2.0,
+        )
+        expanded = selector.choose_centered_frame_indices(
+            records,
+            best_frame_index=9,
+            count=7,
         )
 
-        self.assertEqual(selected, (1, 9, 13))
+        self.assertEqual(selected, (8, 9, 10))
+        self.assertEqual(expanded, (6, 7, 8, 9, 10, 11, 12))
+        self.assertTrue(set(selected).issubset(expanded))
+
+    def test_shifts_centered_window_at_segment_boundaries(self) -> None:
+        records = [
+            frame_record(index, (index - 1) * 0.5)
+            for index in range(1, 9)
+        ]
+
+        at_start = selector.choose_centered_frame_indices(
+            records,
+            best_frame_index=1,
+            count=7,
+        )
+        at_end = selector.choose_centered_frame_indices(
+            records,
+            best_frame_index=8,
+            count=7,
+        )
+
+        self.assertEqual(at_start, (1, 2, 3, 4, 5, 6, 7))
+        self.assertEqual(at_end, (2, 3, 4, 5, 6, 7, 8))
+
+    def test_returns_all_frames_when_segment_is_shorter_than_window(self) -> None:
+        records = [
+            frame_record(index, (index - 1) * 0.5)
+            for index in range(1, 6)
+        ]
+
+        selected = selector.choose_centered_frame_indices(
+            records,
+            best_frame_index=3,
+            count=7,
+        )
+
+        self.assertEqual(selected, (1, 2, 3, 4, 5))
 
     def test_materializes_only_the_formation_side(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

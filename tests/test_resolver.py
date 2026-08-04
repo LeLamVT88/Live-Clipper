@@ -151,6 +151,108 @@ class SubstitutePanelMaskTests(unittest.TestCase):
 
 
 class FormationResolutionTests(unittest.TestCase):
+    def test_compact_serie_a_cards_resolve_and_exclude_substitutes(
+        self,
+    ) -> None:
+        players = [
+            (16, "MAIGNAN", 0.40, 0.14),
+            (23, "TOMORI", 0.20, 0.30),
+            (46, "GABBIA", 0.40, 0.30),
+            (31, "PAVLOVIC", 0.60, 0.30),
+            (56, "SAELEMAEKERS", 0.08, 0.50),
+            (19, "Y. FOFANA", 0.21, 0.50),
+            (30, "JASHARI", 0.34, 0.50),
+            (12, "RABIOT", 0.47, 0.50),
+            (33, "BARTESAGHI", 0.60, 0.50),
+            (7, "GIMENEZ", 0.27, 0.70),
+            (18, "NKUNKU", 0.53, 0.70),
+        ]
+        rows: list[dict[str, object]] = []
+        for shirt_number, player_name, x, number_y in players:
+            rows.extend(
+                [
+                    detection(
+                        frame_index=1,
+                        timestamp_seconds=10.0,
+                        text=str(shirt_number),
+                        text_type="shirt_number_candidate",
+                        x=x,
+                        y=number_y,
+                    ),
+                    detection(
+                        frame_index=1,
+                        timestamp_seconds=10.0,
+                        text=player_name,
+                        text_type="text",
+                        x=x,
+                        y=number_y + 0.027,
+                    ),
+                ]
+            )
+        rows.extend(
+            [
+                detection(
+                    frame_index=1,
+                    timestamp_seconds=10.0,
+                    text="SUBSTITUTES",
+                    text_type="text",
+                    x=0.85,
+                    y=0.15,
+                ),
+                detection(
+                    frame_index=1,
+                    timestamp_seconds=10.0,
+                    text="90",
+                    text_type="shirt_number_candidate",
+                    x=0.80,
+                    y=0.25,
+                ),
+                detection(
+                    frame_index=1,
+                    timestamp_seconds=10.0,
+                    text="RESERVE PLAYER",
+                    text_type="text",
+                    x=0.85,
+                    y=0.277,
+                ),
+            ]
+        )
+        for row in rows:
+            row.update(
+                {
+                    "video": "seriesA_match_04.mp4",
+                    "segment_index": 1,
+                    "segment_end_seconds": 11.0,
+                }
+            )
+
+        segment = resolver.detections_without_substitute_panel(
+            pd.DataFrame(rows)
+        )
+        event = resolver.FormationEvent(
+            snapshot_frames=[1],
+            snapshot_timestamps=[10.0],
+            signatures=[],
+        )
+
+        resolved = formation_resolver.resolve_event(
+            event,
+            segment,
+            event_end_seconds=11.0,
+            lineup_index=1,
+            expected_players=11,
+        )
+
+        self.assertEqual(len(resolved), 11)
+        self.assertEqual(
+            {int(row["shirt_number"]) for row in resolved},
+            {shirt_number for shirt_number, *_ in players},
+        )
+        self.assertNotIn(
+            "RESERVE PLAYER",
+            {str(row["player_name"]) for row in resolved},
+        )
+
     def test_sponsor_text_is_not_treated_as_player_name(self) -> None:
         self.assertFalse(resolver.is_name_like("crypto.Hisense"))
         self.assertFalse(resolver.is_name_like("vivo"))

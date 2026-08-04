@@ -5,24 +5,35 @@ video bóng đá. Trong mỗi segment, project tách frame ở `2 FPS`, dùng sc
 ở `0,5 FPS` để tìm bảng lineup hoàn chỉnh rồi OCR thích ứng 3 frame, 7 frame
 hoặc toàn segment sau khi đã bỏ vùng `SUBSTITUTES`.
 
+Entrypoint vận hành là `src/run_full_pipeline.py`. Script tự chạy
+tuần tự MobileNet, tách hai segment, xuất clip và OCR.
+
 ## Cấu trúc thư mục
 
 ```text
 live-clipper/
 ├── data/
-│   ├── raw_videos/        # video gốc
-│   ├── frames/  # frame 0,5 FPS cho bộ phát hiện
-│   ├── ocr_frames/     # frame 2 FPS chỉ trong các đoạn lineup
-│   ├── ocr_selected_frames/ # frame/crop được chọn cho OCR
-│   ├── ocr_samples/       # frame và ground truth để phát triển OCR
-│   ├── processed/ # metadata, label và dataset phát hiện
-│   └── ground_truth.csv   # khoảng lineup của Đội 1 và Đội 2
+│   ├── raw_videos/       # video dùng để train/evaluate
+│   ├── data_test/        # video mới, có thể chia theo giải đấu
+│   │   ├── premier/
+│   │   ├── seriesA/
+│   │   ├── uefa/
+│   │   └── worldcup/
+│   ├── frames/           # frame phục vụ train cũ
+│   ├── processed/        # metadata, label và dataset train
+│   └── ground_truth.csv
 ├── outputs/
 │   ├── predictions/
-│   │   ├── mobilenet/ # model, frame prediction và segment
-│   │   └── ocr/ # OCR, lineup và diagnostics
-│   └── clips/             # clip lineup được cắt từ video gốc
+│   │   └── mobilenet/     # checkpoint và kết quả train/evaluate dùng chung
+│   └── runs/
+│       └── <video>/       # toàn bộ output của riêng một video
+│           ├── clips/
+│           ├── frames/
+│           └── predictions/
+│               ├── mobilenet/
+│               └── ocr/
 ├── src/
+│   ├── run_full_pipeline.py # entrypoint đầy đủ cho video mới
 │   ├── lineup/            # phát hiện và xuất clip lineup
 │   │   ├── utils.py
 │   │   ├── extract_frames.py
@@ -35,7 +46,7 @@ live-clipper/
 │   │   └── evaluate_segments.py
 │   └── ocr/               # tách frame lineup và đọc tên, số áo
 │       ├── ocr_smoke_test.py
-│       ├── run_pipeline.py # entrypoint duy nhất
+│       ├── run_pipeline.py # entrypoint nội bộ của riêng bước OCR
 │       ├── config.py       # cấu hình và tham số CLI
 │       ├── workflow.py     # điều phối ba tầng fallback
 │       ├── attempts.py     # chạy OCR/resolve một lần thử
@@ -62,19 +73,21 @@ live-clipper/
 
 ## Cài đặt
 
-PaddlePaddle trên macOS hiện cần Python 3.9-3.13, vì vậy project dùng chung
-Python 3.11 cho cả MobileNet và OCR:
+Pipeline dùng `.venv` cho tách frame, MobileNet và xuất clip; riêng OCR dùng
+`.venv-ocr` để tránh xung đột phiên bản PaddlePaddle. Python 3.11 tương thích
+với cả hai nhóm thư viện:
 
 ```bash
 python3.11 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+python3.11 -m venv .venv-ocr
+.venv/bin/python -m pip install -r requirements.txt
+.venv-ocr/bin/python -m pip install -r requirements.txt
 ```
 
 Chạy kiểm tra trên frame lineup mẫu:
 
 ```bash
-.venv/bin/python src/ocr/ocr_smoke_test.py
+.venv-ocr/bin/python src/ocr/ocr_smoke_test.py
 ```
 
 Script dùng hai model CPU nhẹ `PP-OCRv6_small_det` và
@@ -214,92 +227,52 @@ python src/lineup/train_mobilenet.py --device cpu
 
 Mặc định `--device auto` ưu tiên CUDA, sau đó MPS, cuối cùng CPU.
 
-## Dự đoán video mới
+## Chạy pipeline cho video mới
 
-### 1. Tách frame của video
-
-Đặt video mới vào `data/raw_videos/`, sau đó chạy:
-
-```bash
-python src/lineup/extract_frames.py --video "new_match.mp4"
-```
-
-Lần extract này cập nhật `data/processed/extracted_frames.csv`, là input mặc
-định của script inference.
-
-### 2. Chạy MobileNetV3 inference
-
-```bash
-python src/lineup/predict_mobilenet.py
-```
-
-Script tự đọc từ checkpoint:
-
-- kích thước ảnh;
-- raw threshold;
-- smoothing window;
-- threshold sau smoothing.
-
-Kết quả được lưu tại:
+Đặt video vào một thư mục con của `data/data_test/`, ví dụ:
 
 ```text
-outputs/predictions/mobilenet/mobilenet_v3_small_inference.csv
+data/data_test/uefa/uefa_match_01.mp4
+data/data_test/worldcup/worldcup_match_01.mp4
 ```
 
-Các cột kết quả quan trọng:
-
-```text
-score             # xác suất lineup thô của từng frame
-raw_pred_label    # nhãn dùng raw threshold
-smoothed_score    # score sau temporal smoothing
-pred_label        # nhãn cuối dùng threshold đã chọn trên validation
-```
-
-Có thể truyền input hoặc output khác:
+Chạy một video bằng tên file; pipeline tự tìm trong các thư mục con:
 
 ```bash
-python src/lineup/predict_mobilenet.py \
-  --input-csv data/processed/new_match/extracted_frames.csv \
-  --output-csv outputs/predictions/mobilenet/new_match_predictions.csv
+.venv/bin/python src/run_full_pipeline.py --video "uefa_match_01.mp4"
 ```
 
-### 3. Gom prediction thành đoạn lineup
+Chạy nhiều video trong cùng một lệnh bằng cách lặp lại `--video`:
 
 ```bash
-python src/lineup/aggregate.py \
-  --merge-gap-seconds 6 \
-  --min-duration-seconds 8
+.venv/bin/python src/run_full_pipeline.py \
+  --video "worldcup_match_01.mp4" \
+  --video "worldcup_match_02.mp4"
 ```
 
-Mặc định `aggregate.py` dùng `pred_label`, tức nhãn đã áp dụng smoothing và
-threshold lưu trong checkpoint. Kết quả:
-
-```text
-outputs/predictions/mobilenet/lineup_segments.csv
-```
-
-Nếu muốn thử threshold khác, script sẽ ưu tiên `smoothed_score`:
+Nếu bỏ `--video`, pipeline xử lý tuần tự toàn bộ video trong `data/data_test/`.
+Mặc định mỗi video được đọc trong 10 phút đầu. Có thể chọn khoảng khác:
 
 ```bash
-python src/lineup/aggregate.py --threshold 0.6
+.venv/bin/python src/run_full_pipeline.py \
+  --video "uefa_match_01.mp4" \
+  --start 00:01:00 \
+  --end 00:08:00
 ```
 
-### 4. Chạy pipeline OCR trên file segment có sẵn
+Pipeline chạy năm bước:
 
-Script đọc `lineup_segments.csv`, quay lại video gốc và chỉ tách frame trong
-các khoảng lineup. MobileNet vẫn chạy ở `0,5 FPS`; các frame ứng viên được
-tách ở `2 FPS`:
+1. Tách frame `0,5 FPS` cho MobileNet.
+2. Chạy MobileNetV3-Small với threshold và smoothing lưu trong checkpoint.
+3. Gom prediction và bắt buộc hai segment/video. Nếu MobileNet nối hai màn
+   hình lineup thành một đoạn, hậu xử lý cắt tại đáy score cục bộ hợp lệ.
+4. Xuất mỗi segment thành một clip MP4 bằng FFmpeg.
+5. Dùng `.venv-ocr` để chạy scout OCR, OCR thích ứng và resolver.
 
-```bash
-.venv/bin/python src/ocr/run_pipeline.py
-```
+Nếu một bước thất bại, pipeline dừng tại bước đó. Exit code `2` nghĩa là OCR
+đã chạy xong nhưng còn segment không vượt quality gate.
 
-Có thể chọn file segment cụ thể:
-
-```bash
-.venv/bin/python src/ocr/run_pipeline.py \
-  --segments-csv outputs/predictions/mobilenet/premier_match_01_segments.csv
-```
+### Cách OCR xử lý mỗi segment
 
 Mặc định pipeline:
 
@@ -307,55 +280,64 @@ Mặc định pipeline:
 2. Nhận diện layout sơ đồ hoặc danh sách số-tên.
 3. Nếu có `SUBSTITUTES`, tự xác định bảng nằm bên trái/phải và crop phía đội
    hình đối diện.
-4. Tầng 1 OCR ba frame trải đều trong cùng cảnh lineup rồi resolve.
+4. Tầng 1 OCR cửa sổ ba frame quanh scout frame tốt nhất rồi resolve.
 5. Quality gate chỉ chấp nhận kết quả đủ 11 người, 11 số áo khác nhau, tên
    không rỗng/không chứa token giao diện và mọi cặp số-tên đạt confidence
    tối thiểu `0.80`.
-6. Segment không đạt được thử lại ở tầng 2 với bảy frame. Ba frame cũ được
-   tái sử dụng, nên chỉ bốn frame mới phải chạy OCR.
+6. Segment không đạt được thử lại ở tầng 2 với cửa sổ bảy frame quanh cùng
+   scout frame. Ba frame cũ được tái sử dụng, nên chỉ bốn frame mới phải chạy
+   OCR.
 7. Nếu vẫn không đạt, tầng 3 OCR toàn bộ frame `2 FPS` của riêng segment đó.
    Segment scout không tìm được bảng lineup cũng đi thẳng tới tầng này.
 
-Pipeline dùng model CPU nhẹ và ngưỡng OCR `0.80`. Kết quả:
+Pipeline dùng model CPU nhẹ và ngưỡng OCR `0.80`.
+
+### Output theo từng video
+
+Mọi file sinh ra khi vận hành được gom theo tên video, không ghi vào
+`outputs/clips/` hoặc thư mục prediction dùng chung:
+
+Ví dụ `worldcup_match_01.mp4` sẽ tạo thư mục
+`outputs/runs/worldcup_match_01/`:
 
 ```text
-data/ocr_frames/<video>/segment_01/*.jpg
-data/ocr_selected_frames/<video>/segment_01/*.jpg
-outputs/predictions/ocr/ocr_frames.csv
-outputs/predictions/ocr/ocr_scout_detections.csv
-outputs/predictions/ocr/ocr_selected_frames.csv
-outputs/predictions/ocr/ocr_frame_selection_diagnostics.csv
-outputs/predictions/ocr/ocr_raw_detections.csv
-outputs/predictions/ocr/pipeline_attempts.csv
-outputs/predictions/ocr/resolved_lineups.csv
-outputs/predictions/ocr/resolved_lineups_diagnostics.csv
+outputs/runs/<video>/
+├── clips/
+│   ├── <video>_lineup_01_<start>_to_<end>.mp4
+│   └── <video>_lineup_02_<start>_to_<end>.mp4
+├── frames/
+│   ├── mobilenet/<video>/*.jpg
+│   ├── ocr/<video>/segment_01/*.jpg
+│   └── ocr_selected/<video>/segment_01/*.jpg
+└── predictions/
+    ├── mobilenet/
+    │   ├── extracted_frames.csv
+    │   ├── mobilenet_v3_small_inference.csv
+    │   └── lineup_segments.csv
+    └── ocr/
+        ├── ocr_frames.csv
+        ├── ocr_scout_detections.csv
+        ├── ocr_selected_frames.csv
+        ├── ocr_frame_selection_diagnostics.csv
+        ├── ocr_raw_detections.csv
+        ├── pipeline_attempts.csv
+        ├── resolved_lineups.csv
+        └── resolved_lineups_diagnostics.csv
 ```
 
-`ocr_frames.csv` chứa toàn bộ timestamp `2 FPS`.
-`ocr_frame_selection_diagnostics.csv` ghi layout, vùng crop, frame được chọn và
-trạng thái fallback của từng segment. `ocr_raw_detections.csv` chỉ chứa kết quả
+Ba file MobileNet lần lượt chứa metadata frame, score dự đoán từng frame và
+hai khoảng lineup cuối cùng. Trong thư mục OCR, `ocr_frames.csv` chứa toàn bộ
+timestamp `2 FPS`; `ocr_frame_selection_diagnostics.csv` ghi layout, vùng crop,
+frame được chọn và trạng thái fallback. `ocr_raw_detections.csv` chứa kết quả
 OCR của tầng cuối được dùng cho từng segment. `pipeline_attempts.csv` ghi số
 frame, số frame OCR mới, trạng thái resolver và kết quả quality gate ở mỗi
-tầng. `resolved_lineups.csv` chỉ chứa các lineup đã vượt quality gate.
+tầng. `resolved_lineups.csv` là kết quả cuối và chỉ chứa lineup đã vượt quality
+gate; file diagnostics bên cạnh giải thích segment đã resolve được hay chưa.
 
-Có thể thay đổi số frame hoặc ngưỡng quality gate:
+### Cách resolver ghép tên với số áo
 
-```bash
-.venv/bin/python src/ocr/run_pipeline.py \
-  --initial-frame-count 3 \
-  --expanded-frame-count 7 \
-  --min-pair-confidence 0.80
-```
-
-Để chỉ kiểm tra việc tách frame mà chưa chạy OCR:
-
-```bash
-.venv/bin/python src/ocr/run_pipeline.py --extract-only
-```
-
-### 5. Cách resolver ghép tên với số áo
-
-`run_pipeline.py` tự gọi resolver; không còn entrypoint resolve riêng.
+`src/ocr/run_pipeline.py` được pipeline chính gọi nội bộ và tự chạy resolver;
+không còn entrypoint resolve riêng.
 Resolver không dùng roster hoặc API và tự:
 
 1. Đọc dòng dạng danh sách, kể cả khi OCR gộp thành
@@ -381,8 +363,8 @@ Resolver không dùng roster hoặc API và tự:
 Kết quả:
 
 ```text
-outputs/predictions/ocr/resolved_lineups.csv
-outputs/predictions/ocr/resolved_lineups_diagnostics.csv
+outputs/runs/<video>/predictions/ocr/resolved_lineups.csv
+outputs/runs/<video>/predictions/ocr/resolved_lineups_diagnostics.csv
 ```
 
 Các cột chính:
@@ -397,43 +379,13 @@ lineup_index,resolution_method,shirt_number,formation_label,player_name,pair_con
 segment với trạng thái `resolved`/`unresolved` và nguyên nhân. Resolver chỉ
 xuất lineup khi tìm đủ số cầu thủ yêu cầu; nó không tự đoán cho đủ 11.
 
-Có thể tắt lượt OCR cục bộ khi cần cô lập lỗi:
-
-```bash
-.venv/bin/python src/ocr/run_pipeline.py --disable-local-ocr
-```
-
 Lượt OCR cục bộ là cần thiết với các kiểu đồ họa có số rất nhỏ trên áo hoặc
 cột số sát nhau. Nó vẫn chạy hoàn toàn offline sau khi model đã được cache.
 
-### 6. Xuất các đoạn lineup thành clip MP4
+Pipeline chính tự xuất clip ở bước 4 và ghi đè clip cùng tên khi chạy lại.
+Điểm cắt được tái mã hóa bằng H.264/AAC để bám chính xác mốc thời gian.
 
-Mỗi dòng trong `lineup_segments.csv` được xuất thành một file MP4 riêng:
-
-```bash
-python src/lineup/export_clips.py
-```
-
-Mặc định script đọc video nguồn từ `data/raw_videos/` và lưu clip vào
-`outputs/clips/`. Điểm cắt được tái mã hóa bằng H.264/AAC để bám chính xác mốc
-thời gian. Có thể chọn file segment khác, ví dụ:
-
-```bash
-python src/lineup/export_clips.py \
-  --segments-csv outputs/predictions/mobilenet/premier_match_01_segments.csv
-```
-
-Nếu ưu tiên tốc độ và chấp nhận điểm cắt có thể lệch theo keyframe:
-
-```bash
-python src/lineup/export_clips.py --copy-codecs
-```
-
-Script không ghi đè clip đã có. Truyền `--overwrite` khi muốn thay thế chúng.
-CSV đầu vào cần có cột `video` và cặp `start_seconds`/`end_seconds` hoặc
-`start`/`end`.
-
-### 7. Đánh giá theo đoạn trên tập test
+## Đánh giá theo đoạn trên tập test
 
 Đánh giá xem model có tìm đủ hai đoạn lineup, lệch mốc bao nhiêu và có nhận
 nhầm khoảng giới thiệu trọng tài/bắt tay hay không:
@@ -472,8 +424,13 @@ cùng.
 - Bước phát hiện đoạn lineup sử dụng MobileNetV3-Small ở `0,5 FPS`.
   Trong segment đã phát hiện, scout OCR chạy ở `0,5 FPS`; OCR chi tiết thử lần
   lượt 3 frame, 7 frame rồi toàn segment `2 FPS` khi quality gate yêu cầu.
-- `run_pipeline.py` là entrypoint duy nhất; phần workflow, OCR và resolver là
-  module nội bộ, không cần gọi riêng.
+- `src/run_full_pipeline.py` là entrypoint vận hành duy nhất.
+  `src/ocr/run_pipeline.py`, workflow, OCR và resolver là module nội bộ, không
+  cần gọi riêng.
+- Output vận hành luôn nằm trong `outputs/runs/<video>/`. Thư mục
+  `outputs/clips/` cũ không còn được pipeline chính sử dụng.
+- Hậu xử lý luôn yêu cầu đúng hai segment cho mỗi video; khi MobileNet nối hai
+  màn hình lineup, đoạn được tách tại đáy score cục bộ hợp lệ.
 - Resolver ghép kết quả theo thời gian và tọa độ, không tra cứu roster trên
   mạng.
 - Resolver hiện hỗ trợ danh sách số-tên cùng hàng, dòng OCR gộp

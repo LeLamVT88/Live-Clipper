@@ -182,7 +182,11 @@ def nearby_formation_labels(
             dy = (
                 float(row["center_y_norm"]) - cluster.center_y
             )
-            if dx <= 0.07 and 0.03 <= dy <= 0.13:
+            # Compact player cards (for example the Serie A graphic) place
+            # the label only ~0.027 image-heights below the shirt number.
+            # Keep this aligned with formation_anchor_pairs(), which accepts
+            # the same compact geometry from 0.025.
+            if dx <= 0.07 and 0.025 <= dy <= 0.13:
                 candidates.append(
                     (dx + abs(dy - 0.078), row)
                 )

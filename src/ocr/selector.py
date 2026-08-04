@@ -197,81 +197,49 @@ def score_frame_candidate(
     )
 
 
-def choose_spread_frame_indices(
+def choose_centered_frame_indices(
     frame_records: list[dict[str, object]],
-    candidates: list[FrameCandidate],
-    best: FrameCandidate,
+    best_frame_index: int,
     count: int,
-    scout_period_seconds: float,
 ) -> tuple[int, ...]:
     if count <= 0:
         raise LineupFrameSelectionError("selected frame count must be positive.")
 
-    same_layout = sorted(
-        (
-            candidate
-            for candidate in candidates
-            if candidate.layout == best.layout
-        ),
-        key=lambda candidate: candidate.timestamp_seconds,
-    )
-    best_position = next(
-        index
-        for index, candidate in enumerate(same_layout)
-        if candidate.frame_index == best.frame_index
-    )
-    # Sparse scout OCR can miss one otherwise stable lineup frame.  Allow a
-    # little over two scout periods so the detail frames still span the same
-    # graphic scene instead of clustering around the best frame.
-    maximum_gap = 2.1 * scout_period_seconds
-    start = best_position
-    while (
-        start > 0
-        and same_layout[start].timestamp_seconds
-        - same_layout[start - 1].timestamp_seconds
-        <= maximum_gap
-    ):
-        start -= 1
-    end = best_position
-    while (
-        end + 1 < len(same_layout)
-        and same_layout[end + 1].timestamp_seconds
-        - same_layout[end].timestamp_seconds
-        <= maximum_gap
-    ):
-        end += 1
-    scene = same_layout[start : end + 1]
-
-    if len(scene) <= count:
-        selected_indices = {
-            candidate.frame_index for candidate in scene
-        }
-    elif count == 1:
-        selected_indices = {best.frame_index}
-    else:
-        positions = [
-            round(position * (len(scene) - 1) / (count - 1))
-            for position in range(count)
-        ]
-        selected_indices = {
-            scene[position].frame_index for position in positions
-        }
-
-    if len(selected_indices) >= count:
-        return tuple(sorted(selected_indices))
-
-    nearest = sorted(
+    ordered = sorted(
         frame_records,
         key=lambda row: (
-            abs(float(row["timestamp_seconds"]) - best.timestamp_seconds),
+            float(row["timestamp_seconds"]),
             int(row["frame_index"]),
         ),
     )
-    for record in nearest:
-        selected_indices.add(int(record["frame_index"]))
-        if len(selected_indices) == count:
-            break
-    return tuple(sorted(selected_indices))
+    if not ordered:
+        raise LineupFrameSelectionError(
+            "Cannot select OCR frames from an empty segment."
+        )
+
+    best_position = next(
+        (
+            index
+            for index, record in enumerate(ordered)
+            if int(record["frame_index"]) == best_frame_index
+        ),
+        None,
+    )
+    if best_position is None:
+        raise LineupFrameSelectionError(
+            f"Best scout frame metadata is missing: {best_frame_index}"
+        )
+
+    radius = count // 2
+    start = max(0, best_position - radius)
+    end = min(len(ordered), start + count)
+    start = max(0, end - count)
+    return tuple(
+        sorted(
+            int(record["frame_index"])
+            for record in ordered[start:end]
+        )
+    )
 
 
 def fallback_selection(
@@ -351,8 +319,7 @@ def selected_candidate(
         selected_frame_indices=selected_indices,
         message=(
             f"Selected {len(selected_indices)} detailed OCR frame(s) "
-            f"across the stable scene containing scout frame "
-            f"{best.frame_index}."
+            f"in a centered window around scout frame {best.frame_index}."
         ),
     )
 
@@ -411,12 +378,10 @@ def select_segment_frames(
             scout_period,
         )
         best = max(candidates, key=score)
-        selected_indices = choose_spread_frame_indices(
+        selected_indices = choose_centered_frame_indices(
             segment_records,
-            candidates=candidates,
-            best=best,
+            best_frame_index=best.frame_index,
             count=selected_frame_count,
-            scout_period_seconds=scout_period,
         )
         selections.append(
             selected_candidate(
