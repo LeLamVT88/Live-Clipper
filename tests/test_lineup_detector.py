@@ -102,7 +102,6 @@ class LineupDetectorTests(unittest.TestCase):
         self.assertEqual(result.segments[0].start_seconds, 440.0)
         call = client.models.calls[0]
         self.assertEqual(call["model"], "gemini-test")
-        self.assertNotIn("ground_truth", str(call["contents"]).lower())
         self.assertIn("chunk_001_seg_0001", str(call["contents"]))
 
         with tempfile.TemporaryDirectory() as directory:

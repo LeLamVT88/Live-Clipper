@@ -139,7 +139,6 @@ def main(argv: list[str] | None = None) -> int:
                 "transcript_segment_count": len(transcript),
                 "lineup_segment_count": len(result.segments),
                 "created_at": datetime.now(timezone.utc).isoformat(),
-                "ground_truth_used": False,
             },
             detection_metadata_path,
         )

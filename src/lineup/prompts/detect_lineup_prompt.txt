@@ -19,7 +19,7 @@ Do not detect:
 - An interval based on assumptions about where broadcasts usually show lineups.
 
 Rules:
-- Use only the transcript below. You do not have access to ground truth or video frames.
+- Use only the transcript below; do not assume access to video frames.
 - start_seconds and end_seconds must be absolute video timestamps.
 - Bound each result using the earliest and latest cited evidence segments.
 - evidence_segment_ids must contain only IDs copied exactly from the transcript.
