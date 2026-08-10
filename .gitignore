@@ -16,3 +16,10 @@ ocr-deploy/
 
 # Video và dữ liệu sinh tự động
 data/raw_data/**
+
+outputs/clips/**
+!outputs/clips/.gitkeep
+outputs/predictions/**
+!outputs/predictions/.gitkeep
+outputs/runs/**
+!outputs/runs/.gitkeep
