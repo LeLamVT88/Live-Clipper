@@ -7,25 +7,21 @@ from typing import Any
 
 import pandas as pd
 
-from aggregate import predictions_to_segments, smooth_segments
-from utils import ensure_dir, seconds_to_timestamp, timestamp_range_to_seconds
+from utils import (
+    ensure_dir,
+    seconds_to_timestamp,
+    timestamp_range_to_seconds,
+    timestamp_to_seconds,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "predictions" / "mobilenet"
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "predictions" / "lineup"
 DEFAULT_GROUND_TRUTH_CSV = PROJECT_ROOT / "data" / "ground_truth.csv"
-DEFAULT_PREDICTIONS_CSV = (
-    DEFAULT_OUTPUT_DIR / "mobilenet_v3_small_predictions.csv"
-)
-DEFAULT_DETAILS_OUTPUT = (
-    DEFAULT_OUTPUT_DIR / "mobilenet_v3_small_segment_matches.csv"
-)
-DEFAULT_PER_VIDEO_OUTPUT = (
-    DEFAULT_OUTPUT_DIR / "mobilenet_v3_small_segment_metrics_by_video.csv"
-)
-DEFAULT_METRICS_OUTPUT = (
-    DEFAULT_OUTPUT_DIR / "mobilenet_v3_small_segment_metrics.csv"
-)
+DEFAULT_SEGMENTS_CSV = DEFAULT_OUTPUT_DIR / "lineup_segments.csv"
+DEFAULT_DETAILS_OUTPUT = DEFAULT_OUTPUT_DIR / "segment_matches.csv"
+DEFAULT_PER_VIDEO_OUTPUT = DEFAULT_OUTPUT_DIR / "segment_metrics_by_video.csv"
+DEFAULT_METRICS_OUTPUT = DEFAULT_OUTPUT_DIR / "segment_metrics.csv"
 GROUND_TRUTH_COLUMNS = {"video", "Đội 1", "Đội 2"}
 TEAM_COLUMNS = ("Đội 1", "Đội 2")
 
@@ -36,24 +32,17 @@ class SegmentEvaluationError(ValueError):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description=(
-            "Evaluate frame predictions as complete lineup time segments."
-        )
+        description="Evaluate detected lineup time segments against ground truth."
     )
     parser.add_argument("--ground-truth-csv", type=Path, default=DEFAULT_GROUND_TRUTH_CSV)
-    parser.add_argument("--predictions-csv", type=Path, default=DEFAULT_PREDICTIONS_CSV)
+    parser.add_argument("--segments-csv", type=Path, default=DEFAULT_SEGMENTS_CSV)
     parser.add_argument(
-        "--split",
-        default="test",
-        help="Dataset split to evaluate, or 'all' to use every prediction row.",
-    )
-    parser.add_argument(
-        "--threshold",
-        type=float,
-        default=None,
+        "--video",
+        action="append",
+        default=[],
         help=(
-            "Override the prediction threshold. By default, use pred_label from "
-            "the calibrated MobileNet output."
+            "Ground-truth video name to evaluate. Repeat for multiple videos; "
+            "omit to evaluate every ground-truth video."
         ),
     )
     parser.add_argument(
@@ -61,18 +50,6 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.5,
         help="Minimum temporal IoU for a predicted segment to count as detected.",
-    )
-    parser.add_argument(
-        "--merge-gap-seconds",
-        type=float,
-        default=0.0,
-        help="Merge predicted segments separated by this many seconds or less.",
-    )
-    parser.add_argument(
-        "--min-duration-seconds",
-        type=float,
-        default=0.0,
-        help="Drop predicted segments shorter than this duration.",
     )
     parser.add_argument("--details-output", type=Path, default=DEFAULT_DETAILS_OUTPUT)
     parser.add_argument(
@@ -83,14 +60,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def validate_args(args: argparse.Namespace) -> None:
-    if args.threshold is not None and not 0 <= args.threshold <= 1:
-        raise SegmentEvaluationError("--threshold must be between 0 and 1.")
     if not 0 <= args.iou_threshold <= 1:
         raise SegmentEvaluationError("--iou-threshold must be between 0 and 1.")
-    if args.merge_gap_seconds < 0:
-        raise SegmentEvaluationError("--merge-gap-seconds cannot be negative.")
-    if args.min_duration_seconds < 0:
-        raise SegmentEvaluationError("--min-duration-seconds cannot be negative.")
 
 
 def load_ground_truth(csv_path: Path) -> dict[str, list[dict[str, Any]]]:
@@ -147,27 +118,35 @@ def load_ground_truth(csv_path: Path) -> dict[str, list[dict[str, Any]]]:
     return ranges_by_video
 
 
-def load_predictions(csv_path: Path, split: str) -> tuple[pd.DataFrame, str]:
+def load_predicted_segments(csv_path: Path) -> pd.DataFrame:
     if not csv_path.exists():
-        raise SegmentEvaluationError(f"Predictions CSV does not exist: {csv_path}")
+        raise SegmentEvaluationError(f"Segments CSV does not exist: {csv_path}")
 
-    predictions = pd.read_csv(csv_path)
-    if split.lower() == "all":
-        selected = predictions.copy()
-        split_name = "all"
-    else:
-        if "split" not in predictions.columns:
-            raise SegmentEvaluationError(
-                "Predictions do not contain a split column; use --split all."
-            )
-        selected = predictions[predictions["split"].astype(str) == split].copy()
-        split_name = split
+    segments = pd.read_csv(csv_path)
+    if "video" not in segments.columns:
+        raise SegmentEvaluationError("Segments CSV is missing the video column.")
 
-    if selected.empty:
+    has_seconds = {"start_seconds", "end_seconds"}.issubset(segments.columns)
+    has_timestamps = {"start", "end"}.issubset(segments.columns)
+    if not has_seconds and not has_timestamps:
         raise SegmentEvaluationError(
-            f"No prediction rows found for split '{split_name}'."
+            "Segments CSV must contain start_seconds/end_seconds or start/end."
         )
-    return selected, split_name
+
+    parsed = segments.copy()
+    start_column, end_column = (
+        ("start_seconds", "end_seconds") if has_seconds else ("start", "end")
+    )
+    parsed["video"] = parsed["video"].astype(str).str.strip()
+    if (parsed["video"] == "").any():
+        raise SegmentEvaluationError("Segments CSV contains an empty video name.")
+    parsed["start_seconds"] = parsed[start_column].map(timestamp_to_seconds)
+    parsed["end_seconds"] = parsed[end_column].map(timestamp_to_seconds)
+    if (parsed["end_seconds"] <= parsed["start_seconds"]).any():
+        raise SegmentEvaluationError("Every segment must end after it starts.")
+    parsed["start"] = parsed["start_seconds"].map(seconds_to_timestamp)
+    parsed["end"] = parsed["end_seconds"].map(seconds_to_timestamp)
+    return parsed.sort_values(["video", "start_seconds"]).reset_index(drop=True)
 
 
 def intersection_seconds(
@@ -441,9 +420,6 @@ def summarize(
         "split": split_name,
         "videos": len(per_video),
         "iou_threshold": args.iou_threshold,
-        "threshold_override": args.threshold,
-        "merge_gap_seconds": args.merge_gap_seconds,
-        "min_duration_seconds": args.min_duration_seconds,
         "ground_truth_segments": ground_truth_segments,
         "predicted_segments": predicted_segments,
         "detected_segments": detected_segments,
@@ -517,9 +493,9 @@ def main() -> int:
     try:
         validate_args(args)
         ground_truth_by_video = load_ground_truth(args.ground_truth_csv)
-        predictions, split_name = load_predictions(args.predictions_csv, args.split)
+        segments = load_predicted_segments(args.segments_csv)
 
-        prediction_videos = set(predictions["video"].astype(str))
+        prediction_videos = set(segments["video"].astype(str))
         missing_ground_truth = sorted(prediction_videos - set(ground_truth_by_video))
         if missing_ground_truth:
             raise SegmentEvaluationError(
@@ -527,21 +503,27 @@ def main() -> int:
                 + ", ".join(missing_ground_truth)
             )
 
-        segments = predictions_to_segments(predictions, threshold=args.threshold)
-        segments = smooth_segments(
-            segments,
-            merge_gap_seconds=args.merge_gap_seconds,
-            min_duration_seconds=args.min_duration_seconds,
-        )
+        requested_videos = list(dict.fromkeys(args.video))
+        unknown_videos = sorted(set(requested_videos) - set(ground_truth_by_video))
+        if unknown_videos:
+            raise SegmentEvaluationError(
+                "Requested videos are missing from ground truth: "
+                + ", ".join(unknown_videos)
+            )
+        evaluation_videos = requested_videos or sorted(ground_truth_by_video)
+        split_name = "selected" if requested_videos else "all"
+
         segments_by_video: dict[str, list[dict[str, Any]]] = {
-            video: [] for video in sorted(prediction_videos)
+            video: [] for video in evaluation_videos
         }
-        for segment in segments:
-            segments_by_video[str(segment["video"])].append(segment)
+        for segment in segments.to_dict("records"):
+            video = str(segment["video"])
+            if video in segments_by_video:
+                segments_by_video[video].append(segment)
 
         detail_rows: list[dict[str, Any]] = []
         per_video_rows: list[dict[str, Any]] = []
-        for video in sorted(prediction_videos):
+        for video in evaluation_videos:
             video_details, video_metrics = evaluate_video(
                 video=video,
                 ground_truth=ground_truth_by_video[video],

@@ -1,1 +1,1 @@
-"""Lineup clip detection and export pipeline."""
+"""Transcript-driven lineup detection and segment utilities."""

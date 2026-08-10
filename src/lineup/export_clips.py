@@ -23,7 +23,7 @@ DEFAULT_SEGMENTS_CSV = (
     PROJECT_ROOT
     / "outputs"
     / "predictions"
-    / "mobilenet"
+    / "lineup"
     / "lineup_segments.csv"
 )
 DEFAULT_VIDEO_DIR = PROJECT_ROOT / "data" / "raw_videos"

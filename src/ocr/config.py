@@ -15,7 +15,7 @@ DEFAULTS = {
         PROJECT_ROOT
         / "outputs"
         / "predictions"
-        / "mobilenet"
+        / "lineup"
         / "lineup_segments.csv"
     ),
     "video_dir": PROJECT_ROOT / "data" / "raw_videos",

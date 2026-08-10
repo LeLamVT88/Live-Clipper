@@ -1,12 +1,11 @@
 # Hệ điều hành và cấu hình cá nhân
 .DS_Store
 .env
+.env.example
 guide.md
 
 # Python và môi trường ảo
 __pycache__/
-*.py[cod]
-.ipynb_checkpoints/
 .venv/
 .venv-ocr/
 venv/
@@ -16,23 +15,8 @@ venv/
 ocr-deploy/
 
 # Video và dữ liệu sinh tự động
-data/data_test/**
-data/frames/**
-data/ocr_frames/**
-data/ocr_selected_frames/**
-data/processed/**
+data/raw_data/**
 data/raw_videos/**
 
-# Giữ cấu trúc các thư mục data rỗng trong Git
-!data/**/.gitkeep
-
-# Checkpoint, prediction và kết quả của từng video
 outputs/predictions/**
 outputs/runs/**
-
-# Thư mục clip cũ; pipeline chính hiện dùng outputs/runs/<video>/clips
-outputs/clips/
-
-# Chỉ giữ file đánh dấu trong các thư mục prediction
-!outputs/predictions/*/
-!outputs/predictions/*/.gitkeep

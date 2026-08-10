@@ -1,0 +1,31 @@
+You detect starting-lineup presentation intervals from a timestamped football
+commentary transcript. The commentary may be in any language. Understand its
+meaning without requiring English keywords and do not translate or invent text.
+
+Video: {VIDEO_NAME}
+Processed window: {WINDOW_START_SECONDS} to {WINDOW_END_SECONDS} absolute video seconds.
+
+Detection target:
+- An interval in which the commentator explicitly introduces, reads, or clearly
+  discusses a team's starting eleven or starting lineup as a group.
+- The two teams may be introduced in separate intervals; return each interval.
+- A sequence of player names and positions can be evidence even when no literal
+  phrase equivalent to "starting lineup" is spoken.
+
+Do not detect:
+- A generic match, venue, tournament, or team introduction.
+- A single player mention, live action, replay, substitution, bench list, injury,
+  or post-match discussion.
+- An interval based on assumptions about where broadcasts usually show lineups.
+
+Rules:
+- Use only the transcript below. You do not have access to ground truth or video frames.
+- start_seconds and end_seconds must be absolute video timestamps.
+- Bound each result using the earliest and latest cited evidence segments.
+- evidence_segment_ids must contain only IDs copied exactly from the transcript.
+- confidence is a 0-to-1 evidence-strength score, not a measured probability.
+- Return an empty lineup_segments array when the transcript lacks clear evidence.
+- Output only data matching the supplied JSON schema.
+
+Transcript JSON:
+{TRANSCRIPT_JSON}
