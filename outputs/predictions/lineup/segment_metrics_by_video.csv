@@ -1,0 +1,2 @@
+split,video,ground_truth_segments,predicted_segments,detected_segments,false_positive_segments,missed_segments,segment_precision,segment_recall,segment_f1,mean_iou_all_ground_truth,mean_iou_detected,start_mae_seconds,end_mae_seconds,gap_duration_seconds,gap_false_positive_seconds,gap_preservation,all_ground_truth_detected,exact_detection
+selected,ACLE_01.mp4,2,2,2,0,0,1.0,1.0,1.0,0.7133977900552482,0.7133977900552482,1.25,9.100000000000023,72.0,8.0,0.8888888888888888,True,True

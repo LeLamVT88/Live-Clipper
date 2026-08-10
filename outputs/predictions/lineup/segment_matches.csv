@@ -1,0 +1,3 @@
+split,video,ground_truth_segment,status,detected,ground_truth_start,ground_truth_end,ground_truth_start_seconds,ground_truth_end_seconds,prediction_index,prediction_start,prediction_end,prediction_start_seconds,prediction_end_seconds,start_error_seconds,end_error_seconds,temporal_iou
+selected,ACLE_01.mp4,Đội 1,detected,True,00:07:22,00:07:50,442.0,470.0,1,00:07:23,00:07:58,443.0,478.0,1.0,8.0,0.75
+selected,ACLE_01.mp4,Đội 2,detected,True,00:09:02,00:09:28,542.0,568.0,2,00:09:03.5,00:09:38.2,543.5,578.2,1.5,10.200000000000045,0.6767955801104963

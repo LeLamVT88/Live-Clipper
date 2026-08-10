@@ -16,6 +16,3 @@ ocr-deploy/
 
 # Video và dữ liệu sinh tự động
 data/raw_data/**
-
-outputs/predictions/**
-outputs/runs/**

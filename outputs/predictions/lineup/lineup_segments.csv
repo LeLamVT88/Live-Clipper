@@ -1,0 +1,3 @@
+video,segment_id,start_seconds,end_seconds,confidence,evidence_segment_ids,reason,model
+ACLE_01.mp4,lineup_001,443.0,478.0,0.95,"[""chunk_007_seg_0005"", ""chunk_007_seg_0006"", ""chunk_007_seg_0007"", ""chunk_007_seg_0008""]","The commentator introduces Al Ahli's starting eleven, discussing key starting players and position changes as well as bench options.",gemini-3.6-flash
+ACLE_01.mp4,lineup_002,543.5,578.2,0.95,"[""chunk_009_seg_0001"", ""chunk_009_seg_0002"", ""chunk_009_seg_0003"", ""chunk_009_seg_0004"", ""chunk_009_seg_0005""]","The commentator details Buriram United's lineup changes, naming starting players and notable bench inclusions.",gemini-3.6-flash
