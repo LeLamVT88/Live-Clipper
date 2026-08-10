@@ -1,8 +1,6 @@
 # Hệ điều hành và cấu hình cá nhân
 .DS_Store
 .env
-.env.example
-guide.md
 
 # Python và môi trường ảo
 __pycache__/
@@ -12,10 +10,11 @@ venv/
 
 # Model/cache tải về máy
 .cache/
-ocr-deploy/
+ocr-deploy/.cache/
 
 # Video và dữ liệu sinh tự động
 data/raw_data/**
+!data/raw_data/.gitkeep
 
 outputs/clips/**
 !outputs/clips/.gitkeep
