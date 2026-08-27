@@ -13,8 +13,15 @@ import pandas as pd
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-import ocr.selector as selector
-from ocr.selection_io import materialize_selected_frames
+try:
+    import ocr.selector as selector
+    from ocr.selection_io import materialize_selected_frames
+except ModuleNotFoundError as exc:
+    if exc.name != "ocr":
+        raise
+    raise unittest.SkipTest(
+        "Legacy OCR selector tests are not applicable after removing src/ocr."
+    ) from exc
 
 
 def frame_record(

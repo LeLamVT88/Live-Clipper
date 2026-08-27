@@ -1,16 +1,25 @@
 from __future__ import annotations
 
 import argparse
+import json
+import math
 import shutil
 import subprocess
+import sys
 import tempfile
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pandas as pd
 
-from utils import (
+from transcript.audio import AudioExtractionError, probe_media
+
+from lineup.utils import (
     PROJECT_ROOT,
     ensure_dir,
     lineup_clip_name,
@@ -26,7 +35,7 @@ DEFAULT_SEGMENTS_CSV = (
     / "lineup"
     / "lineup_segments.csv"
 )
-DEFAULT_VIDEO_DIR = PROJECT_ROOT / "data" / "raw_videos"
+DEFAULT_VIDEO_DIR = PROJECT_ROOT / "data" / "raw_data"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "clips"
 
 
@@ -40,6 +49,9 @@ class ClipJob:
     output: Path
     start_seconds: float
     end_seconds: float
+    segment_id: str = ""
+    team_name: str = ""
+    csv_row_number: int | None = None
 
     @property
     def duration_seconds(self) -> float:
@@ -68,6 +80,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Replace clips that already exist.",
     )
+    parser.add_argument("--ffprobe", default="ffprobe")
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        help="Defaults to export_manifest.json inside the output directory.",
+    )
     return parser.parse_args()
 
 
@@ -89,6 +107,8 @@ def load_segments(csv_path: Path) -> pd.DataFrame:
         )
 
     parsed = segments.copy()
+    parsed["_csv_row_number"] = [int(index) + 2 for index in parsed.index]
+    parsed["_clip_number"] = parsed.groupby("video", sort=False).cumcount() + 1
     start_column, end_column = (
         ("start_seconds", "end_seconds") if has_seconds else ("start", "end")
     )
@@ -102,9 +122,15 @@ def load_segments(csv_path: Path) -> pd.DataFrame:
         video = str(row["video"]).strip()
         if not video:
             raise ClipExportError(f"Segment row {row_number + 2} has an empty video.")
-        if float(row["_end_seconds"]) <= float(row["_start_seconds"]):
+        start_seconds = float(row["_start_seconds"])
+        end_seconds = float(row["_end_seconds"])
+        if not all(math.isfinite(value) for value in (start_seconds, end_seconds)):
             raise ClipExportError(
-                f"Segment row {row_number + 2} must end after it starts."
+                f"Segment row {row_number + 2} has non-finite timestamps."
+            )
+        if start_seconds < 0 or end_seconds <= start_seconds:
+            raise ClipExportError(
+                f"Segment row {row_number + 2} has an invalid time range."
             )
         parsed.at[row_number, "video"] = video
 
@@ -112,17 +138,29 @@ def load_segments(csv_path: Path) -> pd.DataFrame:
 
 
 def resolve_source(video: str, video_dir: Path) -> Path:
-    video_path = Path(video)
+    video_path = Path(video).expanduser()
     if video_path.is_absolute():
-        return video_path
+        return video_path.resolve()
 
-    directory_candidate = video_dir / video_path
-    if directory_candidate.exists():
+    directory_candidate = (video_dir / video_path).resolve()
+    if directory_candidate.is_file():
         return directory_candidate
 
     project_candidate = resolve_project_path(video_path)
-    if project_candidate.exists():
+    if project_candidate.is_file():
         return project_candidate
+
+    matches = sorted(
+        path.resolve()
+        for path in video_dir.rglob(video_path.name)
+        if path.is_file()
+    )
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise ClipExportError(
+            f"Source video name is ambiguous under {video_dir}: {video}"
+        )
     return directory_candidate
 
 
@@ -139,7 +177,7 @@ def build_jobs(
         source = resolve_source(video, video_dir)
         video_key = str(source.resolve(strict=False))
         clip_numbers[video_key] += 1
-        clip_number = clip_numbers[video_key]
+        clip_number = int(row.get("_clip_number", clip_numbers[video_key]))
         start_seconds = float(row["_start_seconds"])
         end_seconds = float(row["_end_seconds"])
         output_name = lineup_clip_name(
@@ -154,6 +192,13 @@ def build_jobs(
                 output=output_dir / output_name,
                 start_seconds=start_seconds,
                 end_seconds=end_seconds,
+                segment_id=str(row.get("segment_id", "")),
+                team_name=str(row.get("team_name", "")),
+                csv_row_number=(
+                    int(row["_csv_row_number"])
+                    if "_csv_row_number" in row
+                    else None
+                ),
             )
         )
 
@@ -175,7 +220,12 @@ def find_ffmpeg(executable: str) -> str:
     return resolved
 
 
-def validate_jobs(jobs: list[ClipJob], overwrite: bool) -> None:
+def validate_jobs(
+    jobs: list[ClipJob],
+    overwrite: bool,
+    *,
+    ffprobe: str = "ffprobe",
+) -> None:
     missing_sources = sorted({str(job.source) for job in jobs if not job.source.is_file()})
     if missing_sources:
         raise ClipExportError("Source video does not exist: " + ", ".join(missing_sources))
@@ -199,6 +249,23 @@ def validate_jobs(jobs: list[ClipJob], overwrite: bool) -> None:
             "Output clip already exists; pass --overwrite to replace it: "
             + ", ".join(existing_outputs)
         )
+
+    durations: dict[Path, float] = {}
+    for job in jobs:
+        source = job.source.resolve()
+        if source not in durations:
+            try:
+                info = probe_media(source, ffprobe=ffprobe)
+            except AudioExtractionError as exc:
+                raise ClipExportError(str(exc)) from exc
+            if not info.has_video:
+                raise ClipExportError(f"Source has no video stream: {source}")
+            durations[source] = info.duration_seconds
+        if job.end_seconds > durations[source] + 0.05:
+            raise ClipExportError(
+                f"Segment ends beyond source duration ({durations[source]:.3f}s): "
+                f"{source} at {job.end_seconds:.3f}s"
+            )
 
 
 def ffmpeg_command(
@@ -247,7 +314,13 @@ def ffmpeg_command(
     return command
 
 
-def export_job(executable: str, job: ClipJob, copy_codecs: bool) -> None:
+def export_job(
+    executable: str,
+    job: ClipJob,
+    copy_codecs: bool,
+    *,
+    ffprobe: str = "ffprobe",
+) -> None:
     ensure_dir(job.output.parent)
     temporary_file = tempfile.NamedTemporaryFile(
         prefix=f".{job.output.stem}.",
@@ -268,10 +341,60 @@ def export_job(executable: str, job: ClipJob, copy_codecs: bool) -> None:
         if result.returncode != 0:
             detail = result.stderr.strip() or "unknown FFmpeg error"
             raise ClipExportError(f"FFmpeg failed for {job.source}: {detail}")
+        try:
+            output_info = probe_media(temporary_output, ffprobe=ffprobe)
+        except AudioExtractionError as exc:
+            raise ClipExportError(
+                f"Exported clip failed media validation: {exc}"
+            ) from exc
+        if not output_info.has_video:
+            raise ClipExportError(
+                f"Exported clip has no video stream: {temporary_output}"
+            )
+        minimum_duration = max(0.01, min(0.25, job.duration_seconds * 0.5))
+        if output_info.duration_seconds < minimum_duration:
+            raise ClipExportError(
+                "Exported clip is unexpectedly short: "
+                f"{output_info.duration_seconds:.3f}s"
+            )
         temporary_output.chmod(0o644)
         temporary_output.replace(job.output)
     finally:
         temporary_output.unlink(missing_ok=True)
+
+
+def write_export_manifest(
+    *,
+    path: Path,
+    segments_csv: Path,
+    output_dir: Path,
+    exported_jobs: list[ClipJob],
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "segments_csv": str(segments_csv),
+        "output_dir": str(output_dir),
+        "exported_count": len(exported_jobs),
+        "status": "complete",
+        "exported": [
+            {
+                "csv_row_number": job.csv_row_number,
+                "segment_id": job.segment_id,
+                "team_name": job.team_name,
+                "source": str(job.source),
+                "output": str(job.output),
+                "start_seconds": job.start_seconds,
+                "end_seconds": job.end_seconds,
+                "duration_seconds": job.duration_seconds,
+            }
+            for job in exported_jobs
+        ],
+    }
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 def main() -> int:
@@ -280,20 +403,39 @@ def main() -> int:
         segments_csv = resolve_project_path(args.segments_csv)
         video_dir = resolve_project_path(args.video_dir)
         output_dir = resolve_project_path(args.output_dir)
+        manifest_path = resolve_project_path(
+            args.manifest
+            if args.manifest is not None
+            else output_dir / "export_manifest.json"
+        )
         segments = load_segments(segments_csv)
         jobs = build_jobs(segments, video_dir, output_dir)
-        validate_jobs(jobs, overwrite=args.overwrite)
-        executable = find_ffmpeg(args.ffmpeg)
+        validate_jobs(jobs, overwrite=args.overwrite, ffprobe=args.ffprobe)
+        executable = find_ffmpeg(args.ffmpeg) if jobs else args.ffmpeg
 
+        exported_jobs: list[ClipJob] = []
         for position, job in enumerate(jobs, start=1):
             print(
                 f"[{position}/{len(jobs)}] Exporting {job.source.name} "
                 f"{job.start_seconds:.3f}-{job.end_seconds:.3f}s"
             )
-            export_job(executable, job, copy_codecs=args.copy_codecs)
+            export_job(
+                executable,
+                job,
+                copy_codecs=args.copy_codecs,
+                ffprobe=args.ffprobe,
+            )
+            exported_jobs.append(job)
             print(f"Saved clip: {job.output}")
 
+        write_export_manifest(
+            path=manifest_path,
+            segments_csv=segments_csv,
+            output_dir=output_dir,
+            exported_jobs=exported_jobs,
+        )
         print(f"Exported {len(jobs)} clip(s) to: {output_dir}")
+        print(f"Export manifest: {manifest_path}")
         return 0
     except (ClipExportError, OSError, pd.errors.ParserError) as exc:
         print(f"Clip export failed: {exc}")

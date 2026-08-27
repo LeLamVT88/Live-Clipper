@@ -12,8 +12,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 def resolve_project_path(path: object) -> Path:
     """Resolve a project-relative path without changing absolute paths."""
-    resolved_path = Path(str(path))
-    return resolved_path if resolved_path.is_absolute() else PROJECT_ROOT / resolved_path
+    candidate = Path(str(path)).expanduser()
+    return (
+        candidate.resolve()
+        if candidate.is_absolute()
+        else (PROJECT_ROOT / candidate).resolve()
+    )
 
 
 def timestamp_to_seconds(timestamp: object) -> float:

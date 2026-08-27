@@ -1,7 +1,8 @@
-"""Extract Gemini-ready PCM audio from a source video with FFmpeg."""
+"""Extract ASR-ready PCM audio from a source video with FFmpeg."""
 
 from __future__ import annotations
 
+import json
 import math
 import shutil
 import subprocess
@@ -33,6 +34,29 @@ class AudioChunk:
 
 class AudioExtractionError(RuntimeError):
     """Raised when source validation or FFmpeg audio extraction fails."""
+
+
+@dataclass(frozen=True)
+class MediaInfo:
+    """Small FFprobe result used to validate an input before API work starts."""
+
+    duration_seconds: float
+    audio_stream_count: int
+    video_stream_count: int
+
+    @property
+    def has_audio(self) -> bool:
+        return self.audio_stream_count > 0
+
+    @property
+    def has_video(self) -> bool:
+        return self.video_stream_count > 0
+
+    def validate(self) -> None:
+        if not math.isfinite(self.duration_seconds) or self.duration_seconds <= 0:
+            raise AudioExtractionError("Media duration must be finite and positive.")
+        if self.audio_stream_count < 0 or self.video_stream_count < 0:
+            raise AudioExtractionError("Media stream counts cannot be negative.")
 
 
 def plan_audio_chunks(
@@ -80,9 +104,91 @@ def resolve_executable(executable: str) -> str:
     resolved = shutil.which(executable)
     if resolved is None:
         raise AudioExtractionError(
-            f"{executable} was not found. Install FFmpeg or pass --ffmpeg."
+            f"{executable} was not found. Install FFmpeg tools or pass an "
+            "explicit executable path."
         )
     return resolved
+
+
+def probe_media(video_path: Path, *, ffprobe: str = "ffprobe") -> MediaInfo:
+    """Probe duration and stream availability before planning audio chunks."""
+    source = video_path.expanduser().resolve()
+    if not source.is_file():
+        raise AudioExtractionError(f"Source video does not exist: {source}")
+    executable = resolve_executable(ffprobe)
+    command = [
+        executable,
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration:stream=codec_type,duration",
+        "-of",
+        "json",
+        str(source),
+    ]
+    result = subprocess.run(command, check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        detail = (
+            result.stderr.strip()
+            or result.stdout.strip()
+            or "unknown FFprobe error"
+        )
+        raise AudioExtractionError(f"FFprobe media validation failed: {detail}")
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise AudioExtractionError("FFprobe returned invalid JSON.") from exc
+    if not isinstance(payload, dict):
+        raise AudioExtractionError("FFprobe result must be a JSON object.")
+
+    raw_streams = payload.get("streams", [])
+    streams = raw_streams if isinstance(raw_streams, list) else []
+    audio_stream_count = sum(
+        1
+        for stream in streams
+        if isinstance(stream, dict) and stream.get("codec_type") == "audio"
+    )
+    video_stream_count = sum(
+        1
+        for stream in streams
+        if isinstance(stream, dict) and stream.get("codec_type") == "video"
+    )
+
+    raw_format = payload.get("format", {})
+    format_duration: float | None = None
+    if isinstance(raw_format, dict):
+        try:
+            candidate = float(raw_format.get("duration"))
+        except (TypeError, ValueError):
+            candidate = 0.0
+        if math.isfinite(candidate) and candidate > 0:
+            format_duration = candidate
+    stream_durations = (
+        stream.get("duration") for stream in streams if isinstance(stream, dict)
+    )
+    duration_candidates: list[float] = []
+    for raw_duration in stream_durations:
+        try:
+            duration = float(raw_duration)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(duration) and duration > 0:
+            duration_candidates.append(duration)
+    duration = format_duration or (
+        max(duration_candidates) if duration_candidates else None
+    )
+    if duration is None:
+        raise AudioExtractionError(
+            f"FFprobe could not determine a positive duration: {source}"
+        )
+
+    info = MediaInfo(
+        duration_seconds=duration,
+        audio_stream_count=audio_stream_count,
+        video_stream_count=video_stream_count,
+    )
+    info.validate()
+    return info
 
 
 def extract_audio(
@@ -143,7 +249,11 @@ def extract_audio(
 
     result = subprocess.run(command, check=False, capture_output=True, text=True)
     if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip() or "unknown FFmpeg error"
+        detail = (
+            result.stderr.strip()
+            or result.stdout.strip()
+            or "unknown FFmpeg error"
+        )
         raise AudioExtractionError(f"FFmpeg audio extraction failed: {detail}")
     if not destination.is_file() or destination.stat().st_size == 0:
         raise AudioExtractionError(f"FFmpeg did not create audio output: {destination}")

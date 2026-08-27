@@ -15,18 +15,36 @@ if __package__ in (None, ""):
 from dotenv import load_dotenv
 
 from lineup.detector import (
-    GeminiLineupDetector,
+    DEFAULT_TEXT_MODEL,
     LineupDetectionError,
+    QwenLineupDetector,
     write_lineup_csv,
 )
-from transcript.gemini import DEFAULT_MODEL
+from lineup.utils import PROJECT_ROOT, resolve_project_path
+from transcript.qwen import DEFAULT_BASE_URL
 from transcript.schema import TranscriptValidationError, read_jsonl, write_json
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUTPUT = (
     PROJECT_ROOT / "outputs" / "predictions" / "lineup" / "lineup_segments.csv"
 )
+
+
+def _expected_lineups(value: str) -> int | None:
+    normalized = value.strip().casefold()
+    if normalized in {"auto", "none", "0"}:
+        return None
+    try:
+        count = int(normalized)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "expected lineups must be 1, 2, or auto"
+        ) from exc
+    if count not in {1, 2}:
+        raise argparse.ArgumentTypeError(
+            "expected lineups must be 1, 2, or auto"
+        )
+    return count
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -43,18 +61,28 @@ def build_parser() -> argparse.ArgumentParser:
         "--video",
         help="Video filename stored in the CSV; defaults to transcription metadata.",
     )
-    parser.add_argument("--model", help="Defaults to GEMINI_MODEL.")
+    parser.add_argument(
+        "--model",
+        help="Defaults to QWEN_TEXT_MODEL or qwen-plus.",
+    )
+    parser.add_argument(
+        "--base-url",
+        help="DashScope API base URL; defaults to the Singapore endpoint.",
+    )
+    parser.add_argument(
+        "--expected-lineups",
+        type=_expected_lineups,
+        default=2,
+        help=(
+            "Expected coarse lineup count; default is 2. Use auto to accept "
+            "0-2 validated results without enforcing completeness."
+        ),
+    )
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--raw-output", type=Path)
     parser.add_argument("--metadata-output", type=Path)
     parser.add_argument("--overwrite", action="store_true")
     return parser
-
-
-def resolve_project_path(path: Path) -> Path:
-    if path.is_absolute():
-        return path.expanduser().resolve()
-    return (PROJECT_ROOT / path).resolve()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -85,9 +113,14 @@ def main(argv: list[str] | None = None) -> int:
         )
         window_end = float(
             transcription_metadata.get(
-                "requested_end_seconds",
-                window_start
-                + float(transcription_metadata["requested_duration_seconds"]),
+                "processed_end_seconds",
+                transcription_metadata.get(
+                    "requested_end_seconds",
+                    window_start
+                    + float(
+                        transcription_metadata["requested_duration_seconds"]
+                    ),
+                ),
             )
         )
 
@@ -95,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
         raw_output_path = resolve_project_path(
             args.raw_output
             if args.raw_output is not None
-            else output_path.parent / "gemini_detection_raw_response.json"
+            else output_path.parent / "qwen_detection_raw_response.json"
         )
         detection_metadata_path = resolve_project_path(
             args.metadata_output
@@ -108,18 +141,26 @@ def main(argv: list[str] | None = None) -> int:
                     f"Output already exists; pass --overwrite: {output}"
                 )
 
-        api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        api_key = os.getenv("DASHSCOPE_API_KEY")
         if not api_key:
             raise LineupDetectionError(
-                "Missing API key. Set GEMINI_API_KEY in the project .env file."
+                "Missing API key. Set DASHSCOPE_API_KEY in the project .env file."
             )
-        model = args.model or os.getenv("GEMINI_MODEL") or DEFAULT_MODEL
+        model = args.model or os.getenv("QWEN_TEXT_MODEL") or DEFAULT_TEXT_MODEL
+        base_url = (
+            args.base_url or os.getenv("DASHSCOPE_BASE_URL") or DEFAULT_BASE_URL
+        )
         transcript = read_jsonl(transcript_path)
         print(
             f"Detecting lineup in {len(transcript)} transcript segment(s), "
             f"window {window_start:.3f}-{window_end:.3f}s"
         )
-        result = GeminiLineupDetector(api_key=api_key, model=model).detect(
+        result = QwenLineupDetector(
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            expected_segment_count=args.expected_lineups,
+        ).detect(
             transcript,
             video_name=video_name,
             window_start_seconds=window_start,
@@ -129,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
         write_json(result.raw_response, raw_output_path)
         write_json(
             {
-                "provider": "gemini",
+                "provider": "qwen",
                 "model": result.model,
                 "video": video_name,
                 "source_transcript": str(transcript_path),
@@ -138,12 +179,28 @@ def main(argv: list[str] | None = None) -> int:
                 "window_end_seconds": window_end,
                 "transcript_segment_count": len(transcript),
                 "lineup_segment_count": len(result.segments),
+                "expected_lineup_segment_count": args.expected_lineups,
+                "detection_status": result.status,
+                "requires_review": (
+                    args.expected_lineups is not None
+                    and len(result.segments) != args.expected_lineups
+                ),
                 "created_at": datetime.now(timezone.utc).isoformat(),
             },
             detection_metadata_path,
         )
         print(f"Detected lineup segments: {len(result.segments)}")
+        print(f"Detection status: {result.status}")
         print(f"Lineup CSV: {output_path}")
+        if (
+            args.expected_lineups is not None
+            and len(result.segments) != args.expected_lineups
+        ):
+            print(
+                "Detection is incomplete and requires manual review.",
+                file=sys.stderr,
+            )
+            return 2
         return 0
     except (
         FileExistsError,

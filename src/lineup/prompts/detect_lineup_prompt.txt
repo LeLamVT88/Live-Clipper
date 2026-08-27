@@ -1,31 +1,109 @@
-You detect starting-lineup presentation intervals from a timestamped football
-commentary transcript. The commentary may be in any language. Understand its
-meaning without requiring English keywords and do not translate or invent text.
+Bạn đọc transcript bình luận bóng đá có timestamp và tìm các khoảng THÔ mà
+chương trình đang giới thiệu đội hình xuất phát. Bạn chỉ có transcript, không có
+quyền truy cập frame video; kết quả sẽ được lưu nguyên trạng để xử lý ở luồng
+khác sau này.
 
 Video: {VIDEO_NAME}
-Processed window: {WINDOW_START_SECONDS} to {WINDOW_END_SECONDS} absolute video seconds.
+Khoảng đã xử lý: {WINDOW_START_SECONDS}-{WINDOW_END_SECONDS} giây tuyệt đối.
 
-Detection target:
-- An interval in which the commentator explicitly introduces, reads, or clearly
-  discusses a team's starting eleven or starting lineup as a group.
-- The two teams may be introduced in separate intervals; return each interval.
-- A sequence of player names and positions can be evidence even when no literal
-  phrase equivalent to "starting lineup" is spoken.
+Mục tiêu nghiệp vụ:
 
-Do not detect:
-- A generic match, venue, tournament, or team introduction.
-- A single player mention, live action, replay, substitution, bench list, injury,
-  or post-match discussion.
-- An interval based on assumptions about where broadcasts usually show lineups.
+- Trả về tối đa một block tốt nhất cho đội hình xuất phát của mỗi đội.
+- Một trận thông thường có hai kết quả riêng, một cho mỗi đội. Không gộp hai đội
+  thành một khoảng và không trả nhiều block trùng nhau cho cùng một đội. Tuyệt
+  đối không lấy một đoạn phân tích trong trận để bù cho đủ hai kết quả.
+- `team_name` là tên đội được transcript nhắc đến trong chính block đó. Hai kết
+  quả không được có cùng `team_name`; không đoán tên đội chỉ từ tên file.
+- Chỉ trả các block thực sự là lineup. Mọi phần tử được trả về phải có
+  `context="lineup_presentation"`; không trả các candidate thuộc ngữ cảnh khác.
 
-Rules:
-- Use only the transcript below; do not assume access to video frames.
-- start_seconds and end_seconds must be absolute video timestamps.
-- Bound each result using the earliest and latest cited evidence segments.
-- evidence_segment_ids must contain only IDs copied exactly from the transcript.
-- confidence is a 0-to-1 evidence-strength score, not a measured probability.
-- Return an empty lineup_segments array when the transcript lacks clear evidence.
-- Output only data matching the supplied JSON schema.
+Được coi là `lineup_presentation` khi phần bình luận trước trận đang trình bày
+team sheet, starting eleven, sơ đồ xuất phát hoặc một lượt tổng quan đội hình có
+tính biên tập. Không bắt buộc phải có đúng cụm từ “starting eleven”. Những tín
+hiệu đủ mạnh bao gồm:
 
-Transcript JSON:
+- đội có bao nhiêu thay đổi so với trận trước;
+- ai trở lại hoặc lần đầu đá chính, ai bị thay thế hoặc ngồi dự bị;
+- thủ môn, hàng hậu vệ, tiền vệ, tiền đạo hoặc sơ đồ của đội;
+- một chuỗi tên/vị trí được trình bày như đội hình mạnh nhất trước giờ bóng lăn.
+
+Đặc biệt, phần đầu video nói một đội “có N thay đổi”, “chỉ cầu thủ X đã đá trận
+trước”, “cầu thủ Y trở lại/đá chính lần đầu”, rồi nêu các trụ cột được nghỉ và
+tiền đạo chính là một lượt giới thiệu đội hình hợp lệ, dù không đọc đủ 11 tên và
+không dùng nguyên văn “starting lineup”. Không được bỏ block này để chọn một đoạn
+chiến thuật của cùng đội ở thời điểm muộn hơn.
+
+Một chunk có thể chứa cả phần đội hình và phần trọng tài, VAR, tung đồng xu hoặc
+bóng bắt đầu lăn. Nội dung xuất hiện sau đó không biến phần tổng quan đội hình ở
+đầu chunk thành phân tích trong trận. Hãy lấy riêng phần lineup và ước lượng biên
+bên trong chunk.
+
+Không trả về các trường hợp sau:
+
+- phân tích sơ đồ, vai trò, pressing hoặc cách kèm người khi trận đã diễn ra;
+- danh sách thay người, chấn thương, dự bị hoặc nhận xét sau trận;
+- nghi thức cầu thủ lần lượt bước ra khỏi đường hầm hay được xướng tên từng
+  người. Player walkout/ceremonial introduction tuyệt đối không phải block cần
+  cắt, kể cả khi bình luận viên đọc liên tiếp tên, quốc tịch và vị trí của đủ
+  cầu thủ. Hãy bỏ qua block nghi lễ và chọn phần team-sheet/formation xuất hiện
+  sau đó nếu transcript có cả hai.
+
+Hãy xác định mốc bắt đầu play-by-play/kickoff trước khi chọn. Sau khi transcript
+có các diễn biến như chuyền bóng, sút, phạm lỗi, việt vị, phạt góc, kiểm soát
+bóng hoặc gọi tên cầu thủ đang chạm bóng, mọi mô tả sơ đồ/wing-back/trung vệ ở
+phần sau đều là phân tích trong trận và tuyệt đối không được trả về.
+
+Các cụm như “introducing the players one by one”, “next out”, “will follow”,
+“leads out”, “the players make their way out” là bằng chứng trực tiếp của nghi
+lễ. Mọi chuỗi đọc tên tiếp nối phần báo hiệu đó vẫn là walkout, kể cả khi nằm ở
+chunk kế tiếp. Nếu sau nghi lễ còn có các block “here are the starting elevens”,
+đội hình, sơ đồ hoặc huấn luyện viên, bắt buộc chọn các block team-sheet phía
+sau và loại toàn bộ chuỗi walkout phía trước.
+
+Quy tắc timestamp và evidence:
+
+- `start_seconds` và `end_seconds` là giây tuyệt đối của video.
+- Mỗi kết quả bắt buộc điền `start_anchor_text` và `end_anchor_text`. Đây là hai
+  trích đoạn NGUYÊN VĂN ngắn 5-15 từ, sao chép chính xác từ evidence: anchor đầu
+  là những từ đầu tiên của nội dung lineup, anchor cuối là những từ cuối cùng
+  trước khi chuyển chủ đề. Không dịch, sửa chính tả hoặc diễn đạt lại anchor.
+  Hệ thống sẽ dùng vị trí ký tự của hai anchor trong chunk để tính timestamp thô.
+- `start_anchor_text` phải bắt đầu tại câu đầu tiên trực tiếp nói cầu thủ được
+  chọn, vị trí, thay đổi đội hình hoặc sơ đồ. Không lấy câu dẫn giới thiệu huấn
+  luyện viên, thành tích, phong độ hay “sau đây là đội hình” nếu chưa đọc cầu thủ.
+- `end_anchor_text` phải nằm ở cuối toàn bộ block roster liên tục. Nếu sau câu
+  thay đổi đội hình vẫn tiếp tục nêu cầu thủ đá chính, người bị thay thế, sơ đồ
+  hoặc danh sách dự bị của cùng đội, phải bao phủ hết phần đó; không dừng anchor
+  ngay sau câu đầu tiên.
+- Timestamp transcript có thể chỉ chính xác đến chunk. Dựa vào vị trí tương đối
+  của câu lineup trong text để ước lượng start/end thô gần nhất; không mặc định
+  sao chép toàn bộ biên chunk nếu lineup chỉ chiếm một phần.
+- Không được trả nguyên cặp biên chunk như `60.0-120.0` chỉ vì evidence nằm trong
+  chunk đó. Ví dụ nếu 20% đầu text nói về VAR rồi 80% sau mới bắt đầu lineup,
+  hãy ước lượng start gần `72.0`, không phải `60.0`. Tương tự, nếu lineup kết
+  thúc ở khoảng 70% text rồi chuyển sang trọng tài, end phải gần 70% thời lượng
+  chunk. Chỉ dùng trọn biên chunk khi toàn bộ text thực sự là lineup.
+- Evidence của một kết quả phải liên tục theo thời gian và chỉ gồm các ID sao
+  chép chính xác từ transcript.
+- Không được đổi nhãn một chuỗi player walkout thành lineup chỉ vì bình luận viên
+  có nhắc vị trí, quốc tịch, phong độ hoặc việc cầu thủ được chọn. Nếu block từ
+  anchor đầu tới anchor cuối có `next out`, `last out`, `leads out`, `will follow`
+  hoặc một chuỗi `followed by` nối tiếp `leads out`, toàn bộ candidate đó là
+  ceremony và phải loại.
+- `team_name` phải là đội sở hữu các cầu thủ trong block lineup, không phải đối
+  thủ được nhắc trong cùng câu. Kiểm tra tên đội, huấn luyện viên và cầu thủ ở
+  các câu ngay trước/sau để phân biệt hai đội trước khi trả kết quả.
+- Không nối evidence qua phần trọng tài, VAR, khán giả, nghi lễ hoặc nội dung của
+  đội còn lại.
+- Đọc toàn bộ transcript trước khi chọn để ưu tiên đúng hai lượt trình bày đội
+  hình hoàn chỉnh, thay vì các lần nhắc rời rạc đến cầu thủ hoặc chiến thuật.
+- Trả về mảng rỗng nếu transcript thật sự không có phần giới thiệu đội hình.
+- Nếu chỉ có lineup đáng tin cậy của một đội thì chỉ trả một phần tử. Không bịa
+  thêm phần tử thứ hai để đủ số lượng; hệ thống sẽ đánh dấu kết quả incomplete.
+- Chỉ trả một JSON object hợp lệ, không thêm Markdown hoặc giải thích ngoài JSON.
+
+JSON schema bắt buộc:
+{LINEUP_JSON_SCHEMA}
+
+JSON transcript:
 {TRANSCRIPT_JSON}

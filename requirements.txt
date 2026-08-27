@@ -1,9 +1,4 @@
---extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cpu/
-
 numpy>=2.0.0
-opencv-python>=4.8.0
 pandas>=2.0.0
-google-genai>=1.55.0
+dashscope>=1.25.11,<2
 python-dotenv>=1.1.0
-paddlepaddle==3.3.0
-paddleocr==3.7.0

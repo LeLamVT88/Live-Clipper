@@ -7,6 +7,7 @@ import unittest
 import wave
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -14,49 +15,82 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from transcript.audio import AudioExtractionError, plan_audio_chunks, wav_duration_seconds
-from transcript.gemini import GeminiTranscriber, GeminiTranscriptionError
+from transcript.audio import (
+    AudioExtractionError,
+    MediaInfo,
+    plan_audio_chunks,
+    probe_media,
+    wav_duration_seconds,
+)
+from transcript.qwen import QwenTranscriber, QwenTranscriptionError
 from transcript.schema import (
     TranscriptSegment,
     TranscriptValidationError,
     read_jsonl,
+    write_json,
     write_jsonl,
+)
+from transcript.transcribe_video import (
+    build_parser as build_transcription_parser,
+    fit_processing_duration,
+    load_cached_chunk,
 )
 
 
-class FakeFiles:
-    def __init__(self) -> None:
-        self.upload_calls: list[dict[str, object]] = []
-        self.deleted_names: list[str] = []
-
-    def upload(self, **kwargs: object) -> object:
-        self.upload_calls.append(kwargs)
-        return SimpleNamespace(name="files/test-audio", state="ACTIVE")
-
-    def get(self, *, name: str) -> object:
-        return SimpleNamespace(name=name, state="ACTIVE")
-
-    def delete(self, *, name: str) -> None:
-        self.deleted_names.append(name)
-
-
-class FakeModels:
-    def __init__(self, payload: dict[str, object]) -> None:
-        self.payload = payload
+class FakeQwenClient:
+    def __init__(
+        self,
+        text: str,
+        *,
+        failures_before_success: int = 0,
+        status_code: int = 200,
+    ) -> None:
+        self.text = text
+        self.failures_before_success = failures_before_success
+        self.status_code = status_code
         self.calls: list[dict[str, object]] = []
 
-    def generate_content(self, **kwargs: object) -> object:
+    def call(self, **kwargs: object) -> object:
         self.calls.append(kwargs)
-        return SimpleNamespace(text=json.dumps(self.payload, ensure_ascii=False))
-
-
-class FakeGeminiClient:
-    def __init__(self, payload: dict[str, object]) -> None:
-        self.files = FakeFiles()
-        self.models = FakeModels(payload)
+        if len(self.calls) <= self.failures_before_success:
+            raise RuntimeError("503 UNAVAILABLE: model is overloaded")
+        return SimpleNamespace(
+            status_code=self.status_code,
+            code="InvalidParameter" if self.status_code != 200 else None,
+            message="bad request" if self.status_code != 200 else None,
+            request_id="request-test",
+            usage={"seconds": 20},
+            output={
+                "choices": [
+                    {
+                        "message": {
+                            "content": [{"text": self.text}],
+                            "annotations": [
+                                {
+                                    "type": "audio_info",
+                                    "language": "vi",
+                                    "emotion": "neutral",
+                                }
+                            ],
+                        }
+                    }
+                ]
+            },
+        )
 
 
 class TranscriptSchemaTests(unittest.TestCase):
+    def test_cli_uses_ten_one_minute_chunks_and_exposes_resume(self) -> None:
+        args = build_transcription_parser().parse_args(
+            ["--video", "match.mp4", "--resume"]
+        )
+
+        self.assertEqual(args.duration, "600")
+        self.assertEqual(args.chunk_duration, "60")
+        self.assertEqual(args.max_chunks, 10)
+        self.assertEqual(args.workers, 4)
+        self.assertTrue(args.resume)
+
     def test_plans_fixed_chunks_covering_the_complete_requested_window(self) -> None:
         chunks = plan_audio_chunks(
             start_seconds=10.0,
@@ -83,6 +117,86 @@ class TranscriptSchemaTests(unittest.TestCase):
                 duration_seconds=600.0,
                 chunk_duration_seconds=0.0,
             )
+
+    def test_short_video_uses_fewer_than_ten_chunks(self) -> None:
+        media = MediaInfo(
+            duration_seconds=354.2,
+            audio_stream_count=1,
+            video_stream_count=1,
+        )
+        duration = fit_processing_duration(
+            media=media,
+            start_seconds=0.0,
+            requested_duration_seconds=600.0,
+            chunk_duration_seconds=60.0,
+            max_chunks=10,
+        )
+        chunks = plan_audio_chunks(
+            start_seconds=0.0,
+            duration_seconds=duration,
+            chunk_duration_seconds=60.0,
+        )
+
+        self.assertEqual(duration, 354.2)
+        self.assertEqual(len(chunks), 6)
+        self.assertAlmostEqual(chunks[-1].duration_seconds, 54.2)
+
+    def test_processing_window_never_exceeds_ten_chunks(self) -> None:
+        media = MediaInfo(
+            duration_seconds=1_876.0,
+            audio_stream_count=1,
+            video_stream_count=1,
+        )
+
+        duration = fit_processing_duration(
+            media=media,
+            start_seconds=0.0,
+            requested_duration_seconds=1_200.0,
+            chunk_duration_seconds=60.0,
+            max_chunks=10,
+        )
+
+        self.assertEqual(duration, 600.0)
+
+    def test_processing_rejects_input_without_audio(self) -> None:
+        media = MediaInfo(
+            duration_seconds=600.0,
+            audio_stream_count=0,
+            video_stream_count=1,
+        )
+
+        with self.assertRaisesRegex(AudioExtractionError, "no audio stream"):
+            fit_processing_duration(
+                media=media,
+                start_seconds=0.0,
+                requested_duration_seconds=600.0,
+                chunk_duration_seconds=60.0,
+                max_chunks=10,
+            )
+
+    def test_ffprobe_preflight_reads_duration_and_streams(self) -> None:
+        response = SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "streams": [
+                        {"codec_type": "video", "duration": "99.9"},
+                        {"codec_type": "audio", "duration": "99.8"},
+                    ],
+                    "format": {"duration": "100.0"},
+                }
+            ),
+            stderr="",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "input.mp4"
+            source.write_bytes(b"input")
+            with patch("transcript.audio.subprocess.run", return_value=response):
+                info = probe_media(source)
+
+        self.assertEqual(info.duration_seconds, 100.0)
+        self.assertEqual(info.audio_stream_count, 1)
+        self.assertEqual(info.video_stream_count, 1)
 
     def test_segment_serializes_normalized_values(self) -> None:
         segment = TranscriptSegment(
@@ -152,93 +266,150 @@ class TranscriptSchemaTests(unittest.TestCase):
 
         self.assertEqual(loaded, (segment,))
 
+    def test_loads_a_complete_chunk_checkpoint(self) -> None:
+        segment = TranscriptSegment(
+            segment_id="chunk_001_seg_0001",
+            start_seconds=121.0,
+            end_seconds=124.0,
+            text="Starting eleven",
+            source_chunk="chunk_001",
+            chunk_start_seconds=120.0,
+        )
+        payload = {
+            "segments": [
+                {
+                    "start_seconds": 1.0,
+                    "end_seconds": 4.0,
+                    "text": "Starting eleven",
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            transcript_path = root / "chunk.jsonl"
+            raw_path = root / "chunk.json"
+            write_jsonl((segment,), transcript_path)
+            write_json(payload, raw_path)
 
-class GeminiTranscriberTests(unittest.TestCase):
+            segments, raw = load_cached_chunk(
+                transcript_path=transcript_path,
+                raw_response_path=raw_path,
+                source_chunk="chunk_001",
+                chunk_start_seconds=120.0,
+            )
+
+        self.assertEqual(segments, (segment,))
+        self.assertEqual(raw, payload)
+
+
+class QwenTranscriberTests(unittest.TestCase):
     def _audio_file(self, directory: str) -> Path:
         path = Path(directory) / "chunk.wav"
         path.write_bytes(b"fake wav content")
         return path
 
-    def test_transcription_orders_segments_and_adds_video_offset(self) -> None:
-        client = FakeGeminiClient(
-            {
-                "segments": [
-                    {"start_seconds": 8, "end_seconds": 12, "text": "Cầu thủ B"},
-                    {"start_seconds": 1.25, "end_seconds": 4.5, "text": "Cầu thủ A"},
-                ]
-            }
-        )
-        transcriber = GeminiTranscriber(model="gemini-test", client=client)
+    def test_transcription_uses_chunk_bounds_and_adds_video_offset(self) -> None:
+        client = FakeQwenClient("Đây là đội hình xuất phát của PSG.")
+        transcriber = QwenTranscriber(model="qwen-test", client=client)
+        captured: list[dict[str, object]] = []
 
         with tempfile.TemporaryDirectory() as directory:
+            audio_path = self._audio_file(directory)
             result = transcriber.transcribe(
-                self._audio_file(directory),
+                audio_path,
                 audio_duration_seconds=20.0,
                 language="vi",
                 source_chunk="chunk_003",
                 chunk_start_seconds=300.0,
+                raw_response_callback=captured.append,
             )
 
+        self.assertEqual(len(result.segments), 1)
+        segment = result.segments[0]
+        self.assertEqual(segment.segment_id, "chunk_003_seg_0001")
+        self.assertEqual(segment.start_seconds, 300.0)
+        self.assertEqual(segment.end_seconds, 320.0)
+        self.assertEqual(segment.text, "Đây là đội hình xuất phát của PSG.")
+        call = client.calls[0]
+        self.assertEqual(call["model"], "qwen-test")
+        self.assertEqual(call["result_format"], "message")
         self.assertEqual(
-            [segment.segment_id for segment in result.segments],
-            ["chunk_003_seg_0001", "chunk_003_seg_0002"],
+            call["asr_options"],
+            {"enable_itn": True, "language": "vi"},
         )
+        messages = call["messages"]
         self.assertEqual(
-            [segment.start_seconds for segment in result.segments],
-            [301.25, 308.0],
+            messages[0]["content"][0]["audio"],
+            str(audio_path.resolve()),
         )
-        self.assertEqual(client.files.deleted_names, ["files/test-audio"])
-        self.assertEqual(client.files.upload_calls[0]["config"], {"mime_type": "audio/wav"})
-        generation_call = client.models.calls[0]
-        self.assertEqual(generation_call["model"], "gemini-test")
-        config = generation_call["config"]
-        self.assertEqual(config["response_mime_type"], "application/json")
-        self.assertIn("response_json_schema", config)
-        schema = config["response_json_schema"]
-        properties = schema["properties"]["segments"]["items"]["properties"]
-        self.assertEqual(properties["end_seconds"]["maximum"], 20.0)
-        self.assertNotIn("temperature", config)
+        self.assertEqual(captured[0]["request_id"], "request-test")
+        self.assertEqual(captured[0]["segments"][0]["end_seconds"], 20.0)
 
-    def test_invalid_model_timestamp_still_deletes_uploaded_file(self) -> None:
-        client = FakeGeminiClient(
-            {
-                "segments": [
-                    {"start_seconds": 1, "end_seconds": 30, "text": "Ngoài audio"}
-                ]
-            }
-        )
-        transcriber = GeminiTranscriber(model="gemini-test", client=client)
+    def test_auto_language_is_omitted_and_context_is_optional(self) -> None:
+        client = FakeQwenClient("Starting eleven")
+        transcriber = QwenTranscriber(model="qwen-test", client=client)
 
         with tempfile.TemporaryDirectory() as directory:
-            with self.assertRaisesRegex(
-                GeminiTranscriptionError, "outside the audio duration"
-            ):
-                transcriber.transcribe(
-                    self._audio_file(directory),
-                    audio_duration_seconds=10.0,
-                )
+            transcriber.transcribe(
+                self._audio_file(directory),
+                audio_duration_seconds=10.0,
+                context="PSG versus Aston Villa; football commentary.",
+            )
 
-        self.assertEqual(client.files.deleted_names, ["files/test-audio"])
+        call = client.calls[0]
+        self.assertEqual(call["asr_options"], {"enable_itn": True})
+        messages = call["messages"]
+        self.assertEqual(messages[0]["role"], "system")
+        self.assertIn("PSG", messages[0]["content"][0]["text"])
+        self.assertEqual(messages[1]["role"], "user")
 
-    def test_small_timestamp_overrun_is_clamped_and_raw_response_is_saved(self) -> None:
-        payload = {
-            "segments": [
-                {"start_seconds": 295, "end_seconds": 305, "text": "Cuối chunk"}
-            ]
-        }
-        client = FakeGeminiClient(payload)
-        transcriber = GeminiTranscriber(model="gemini-test", client=client)
+    def test_empty_asr_text_is_treated_as_silence(self) -> None:
+        client = FakeQwenClient("   ")
+        transcriber = QwenTranscriber(model="qwen-test", client=client)
         captured: list[dict[str, object]] = []
 
         with tempfile.TemporaryDirectory() as directory:
             result = transcriber.transcribe(
                 self._audio_file(directory),
-                audio_duration_seconds=300.0,
+                audio_duration_seconds=10.0,
                 raw_response_callback=captured.append,
             )
 
-        self.assertEqual(result.segments[0].end_seconds, 300.0)
-        self.assertEqual(captured, [payload])
+        self.assertEqual(result.segments, ())
+        self.assertEqual(captured[0]["segments"], [])
+
+    def test_retries_a_transient_request_without_restarting_the_run(self) -> None:
+        client = FakeQwenClient("Lineup", failures_before_success=1)
+        transcriber = QwenTranscriber(
+            model="qwen-test",
+            client=client,
+            max_attempts=2,
+            retry_delay_seconds=0,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            result = transcriber.transcribe(
+                self._audio_file(directory),
+                audio_duration_seconds=10.0,
+            )
+
+        self.assertEqual(len(result.segments), 1)
+        self.assertEqual(len(client.calls), 2)
+
+    def test_non_successful_dashscope_response_is_rejected(self) -> None:
+        client = FakeQwenClient("", status_code=400)
+        transcriber = QwenTranscriber(
+            model="qwen-test",
+            client=client,
+            max_attempts=1,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(QwenTranscriptionError, "400"):
+                transcriber.transcribe(
+                    self._audio_file(directory),
+                    audio_duration_seconds=10.0,
+                )
 
 
 if __name__ == "__main__":
