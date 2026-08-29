@@ -90,6 +90,7 @@ class TranscriptSchemaTests(unittest.TestCase):
         self.assertEqual(args.max_chunks, 10)
         self.assertEqual(args.workers, 4)
         self.assertTrue(args.resume)
+        self.assertIsNone(args.output_dir)
 
     def test_plans_fixed_chunks_covering_the_complete_requested_window(self) -> None:
         chunks = plan_audio_chunks(

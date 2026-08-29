@@ -8,6 +8,8 @@ from pathlib import Path
 
 PathLike = str | Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+RAW_DATA_ROOT = PROJECT_ROOT / "data" / "raw_data"
+OUTPUT_ROOT = PROJECT_ROOT / "outputs"
 
 
 def resolve_project_path(path: object) -> Path:
@@ -112,6 +114,57 @@ def safe_stem(value: str) -> str:
     ascii_name = normalized.encode("ascii", "ignore").decode("ascii")
     safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", ascii_name).strip("._-")
     return safe_name or "video"
+
+
+def default_run_dir(
+    video_path: PathLike,
+    *,
+    raw_data_root: PathLike = RAW_DATA_ROOT,
+    output_root: PathLike = OUTPUT_ROOT,
+) -> Path:
+    """Mirror a raw video's parent folders directly under ``outputs``.
+
+    For example, ``data/raw_data/ACLE/ACLE_01.mp4`` maps to
+    ``outputs/ACLE/ACLE_01``. Videos outside ``data/raw_data`` use the
+    fallback ``outputs/<video-stem>``.
+    """
+    video = resolve_project_path(video_path)
+    raw_root = resolve_project_path(raw_data_root)
+    outputs = resolve_project_path(output_root)
+    try:
+        relative_video = video.relative_to(raw_root)
+    except ValueError:
+        return outputs / safe_stem(video.stem)
+    return outputs / relative_video.parent / safe_stem(relative_video.stem)
+
+
+def default_lineup_prediction_dir(
+    transcript_path: PathLike,
+    *,
+    source_video: PathLike | None = None,
+) -> Path:
+    """Return the lineup prediction folder beside a standard transcript."""
+    transcript = resolve_project_path(transcript_path)
+    transcript_dir = transcript.parent
+    predictions_dir = transcript_dir.parent
+    if (
+        transcript_dir.name == "transcript"
+        and predictions_dir.name == "predictions"
+    ):
+        return predictions_dir / "lineup"
+    if source_video is not None and str(source_video).strip():
+        return default_run_dir(source_video) / "predictions" / "lineup"
+    return transcript.parent / "lineup"
+
+
+def default_lineup_clip_dir(segments_csv: PathLike) -> Path:
+    """Return ``<run>/clips/lineup`` for a standard lineup prediction CSV."""
+    segments_path = resolve_project_path(segments_csv)
+    lineup_dir = segments_path.parent
+    predictions_dir = lineup_dir.parent
+    if lineup_dir.name == "lineup" and predictions_dir.name == "predictions":
+        return predictions_dir.parent / "clips" / "lineup"
+    return segments_path.parent / "clips"
 
 
 def seconds_tag(value: float) -> str:

@@ -202,6 +202,64 @@ def _normalized_text(value: str) -> str:
     return unicodedata.normalize("NFKC", value).casefold()
 
 
+_ANCHOR_TOKEN_PATTERN = re.compile(r"\w+(?:['’]\w+)*", re.UNICODE)
+
+
+def _anchor_token_matches(
+    anchor: str,
+    evidence_text: str,
+) -> list[tuple[int, int]]:
+    """Find an anchor by words while tolerating punctuation-only differences."""
+    normalized_anchor = _normalized_text(anchor)
+    normalized_evidence = _normalized_text(evidence_text)
+    anchor_tokens = [
+        match.group(0).replace("’", "'").replace("'", "")
+        for match in _ANCHOR_TOKEN_PATTERN.finditer(normalized_anchor)
+    ]
+    evidence_matches = list(
+        _ANCHOR_TOKEN_PATTERN.finditer(normalized_evidence)
+    )
+    evidence_tokens = [
+        match.group(0).replace("’", "'").replace("'", "")
+        for match in evidence_matches
+    ]
+    width = len(anchor_tokens)
+    if width == 0 or width > len(evidence_tokens):
+        return []
+    matches: list[tuple[int, int]] = []
+    for index in range(len(evidence_tokens) - width + 1):
+        if evidence_tokens[index : index + width] != anchor_tokens:
+            continue
+        matches.append(
+            (
+                evidence_matches[index].start(),
+                evidence_matches[index + width - 1].end(),
+            )
+        )
+    return matches
+
+
+def _anchor_character_matches(
+    anchor: str,
+    evidence_text: str,
+) -> list[tuple[int, int]]:
+    normalized_anchor = _normalized_text(anchor)
+    normalized_evidence = _normalized_text(evidence_text)
+    literal_matches: list[tuple[int, int]] = []
+    position = normalized_evidence.find(normalized_anchor)
+    while position >= 0:
+        literal_matches.append(
+            (position, position + len(normalized_anchor))
+        )
+        position = normalized_evidence.find(
+            normalized_anchor,
+            position + max(1, len(normalized_anchor)),
+        )
+    if literal_matches:
+        return literal_matches
+    return _anchor_token_matches(anchor, evidence_text)
+
+
 def _parse_candidate(
     item: object,
     *,
@@ -211,6 +269,7 @@ def _parse_candidate(
     evidence_texts: Mapping[str, str] | None,
     window_start: float,
     window_end: float,
+    max_segment_duration_seconds: float | None,
 ) -> LineupSegment | None:
     if not isinstance(item, dict):
         raise LineupDetectionError(f"Candidate {index} must be an object.")
@@ -267,6 +326,32 @@ def _parse_candidate(
     unknown = set(evidence) - known_evidence
     if not evidence or unknown:
         raise LineupDetectionError(f"Candidate {index} has invalid evidence IDs.")
+    if evidence_texts is not None:
+        repaired_evidence = list(evidence)
+        for anchor in (start_anchor, end_anchor):
+            cited_matches = [
+                evidence_id
+                for evidence_id in repaired_evidence
+                if _anchor_character_matches(
+                    anchor,
+                    evidence_texts[evidence_id],
+                )
+            ]
+            if cited_matches:
+                continue
+            global_matches = [
+                evidence_id
+                for evidence_id, text in evidence_texts.items()
+                if evidence_id in known_evidence
+                and _anchor_character_matches(anchor, text)
+            ]
+            if len(global_matches) == 1:
+                repaired_evidence.append(global_matches[0])
+        if evidence_bounds is not None:
+            repaired_evidence.sort(
+                key=lambda evidence_id: evidence_bounds[evidence_id]
+            )
+        evidence = tuple(dict.fromkeys(repaired_evidence))
     evidence_start: float | None = None
     evidence_end: float | None = None
     if evidence_bounds is not None and evidence:
@@ -277,25 +362,29 @@ def _parse_candidate(
     def anchor_time(anchor: str, field: str, *, use_end: bool) -> float | None:
         if evidence_bounds is None or evidence_texts is None:
             return None
-        normalized_anchor = _normalized_text(anchor)
-        matches: list[tuple[str, int, int]] = []
+        matches: list[tuple[str, int, int, int]] = []
         for evidence_id in evidence:
             text = evidence_texts[evidence_id]
             normalized_evidence = _normalized_text(text)
-            position = normalized_evidence.find(normalized_anchor)
-            while position >= 0:
-                matches.append((evidence_id, position, len(normalized_evidence)))
-                position = normalized_evidence.find(
-                    normalized_anchor, position + max(1, len(normalized_anchor))
+            matches.extend(
+                (
+                    evidence_id,
+                    match_start,
+                    match_end,
+                    len(normalized_evidence),
                 )
+                for match_start, match_end in _anchor_character_matches(
+                    anchor,
+                    text,
+                )
+            )
         if len(matches) != 1:
             detail = "not found" if not matches else "ambiguous"
             raise LineupDetectionError(
                 f"Candidate {index} {field} is {detail} in cited evidence."
             )
-        evidence_id, position, text_length = matches[0]
-        if use_end:
-            position += len(normalized_anchor)
+        evidence_id, match_start, match_end, text_length = matches[0]
+        position = match_end if use_end else match_start
         segment_start, segment_end = evidence_bounds[evidence_id]
         fraction = position / max(1, text_length)
         return segment_start + (segment_end - segment_start) * fraction
@@ -324,6 +413,15 @@ def _parse_candidate(
         )
     if start < window_start - 2 or end > window_end + 2:
         raise LineupDetectionError(f"Candidate {index} is outside the window.")
+    if (
+        max_segment_duration_seconds is not None
+        and end - start > max_segment_duration_seconds
+    ):
+        raise LineupDetectionError(
+            f"Candidate {index} coarse duration {end - start:.3f}s exceeds "
+            f"the {max_segment_duration_seconds:g}s maximum; choose the most "
+            "compact continuous direct-roster block."
+        )
 
     ceremony_markers = (
         "introducing the players one by one",
@@ -334,7 +432,12 @@ def _parse_candidate(
         "leads out",
         "leads us out",
         "last out",
+        "last one out",
         "make their way out",
+        "will be coming out",
+        "comes through next",
+        "players coming through the line",
+        "as they came out",
     )
     ceremony_parts = [
         start_anchor,
@@ -446,7 +549,18 @@ def parse_detection_result(
     evidence_texts: Mapping[str, str] | None = None,
     window_start: float,
     window_end: float,
+    max_segment_duration_seconds: float | None = None,
 ) -> LineupDetectionResult:
+    if (
+        max_segment_duration_seconds is not None
+        and (
+            not math.isfinite(max_segment_duration_seconds)
+            or max_segment_duration_seconds <= 0
+        )
+    ):
+        raise LineupDetectionError(
+            "Maximum lineup segment duration must be positive."
+        )
     if not isinstance(payload, dict) or not isinstance(
         payload.get("lineup_segments"), list
     ):
@@ -467,6 +581,9 @@ def parse_detection_result(
                     evidence_texts=evidence_texts,
                     window_start=window_start,
                     window_end=window_end,
+                    max_segment_duration_seconds=(
+                        max_segment_duration_seconds
+                    ),
                 )
             )
         except RejectedLineupCandidate as exc:

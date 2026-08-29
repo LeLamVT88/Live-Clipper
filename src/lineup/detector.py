@@ -1,4 +1,4 @@
-"""Qwen adapter for transcript-driven lineup detection."""
+"""Qwen text-over-transcript adapter for coarse lineup detection."""
 
 from __future__ import annotations
 
@@ -7,10 +7,11 @@ import math
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from transcript.qwen import (
-    DEFAULT_BASE_URL,
     DEFAULT_MAX_ATTEMPTS,
     DEFAULT_RETRY_DELAY_SECONDS,
     QwenTranscriptionError,
@@ -18,6 +19,8 @@ from transcript.qwen import (
     is_transient_qwen_error,
     qwen_message,
     qwen_message_text,
+    response_field,
+    response_to_plain,
 )
 from transcript.schema import TranscriptSegment
 
@@ -33,10 +36,108 @@ from .schema import (
 
 DEFAULT_PROMPT_PATH = Path(__file__).parent / "prompts" / "detect_lineup_prompt.txt"
 DEFAULT_TEXT_MODEL = "qwen-plus"
+DEFAULT_TEXT_BASE_URL = (
+    "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+)
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 120.0
+DEFAULT_MAX_COARSE_LINEUP_DURATION_SECONDS = 75.0
 
 
 class QwenLineupRequestError(LineupDetectionError):
     """A request-level failure, kept separate from payload validation errors."""
+
+
+class QwenLineupValidationError(LineupDetectionError):
+    """All model payloads failed validation, with diagnostics preserved."""
+
+    def __init__(
+        self,
+        message: str,
+        attempts: Iterable[dict[str, object]],
+    ) -> None:
+        super().__init__(message)
+        self.attempts = tuple(dict(attempt) for attempt in attempts)
+
+    def raw_response(self) -> dict[str, object]:
+        return {
+            "lineup_segments": [],
+            "_error": str(self),
+            "_validation_attempts": list(self.attempts),
+        }
+
+
+class OpenAICompatibleLineupClient:
+    """Small dependency-free client for an OpenAI-compatible chat endpoint."""
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        api_key: str | None = None,
+        timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        opener: Callable[..., object] = urlopen,
+    ) -> None:
+        normalized_url = base_url.rstrip("/")
+        if not normalized_url:
+            raise LineupDetectionError("Lineup model base URL cannot be empty.")
+        if timeout_seconds <= 0:
+            raise LineupDetectionError("Lineup request timeout must be positive.")
+        self.endpoint = f"{normalized_url}/chat/completions"
+        self.api_key = api_key
+        self.timeout_seconds = timeout_seconds
+        self.opener = opener
+
+    def call(self, **kwargs: object) -> object:
+        request_started = time.monotonic()
+        body = {
+            key: kwargs[key]
+            for key in (
+                "model",
+                "messages",
+                "temperature",
+                "max_tokens",
+                "response_format",
+                "enable_thinking",
+            )
+            if key in kwargs
+        }
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        request = Request(
+            self.endpoint,
+            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with self.opener(  # type: ignore[attr-defined]
+                request, timeout=self.timeout_seconds
+            ) as response:
+                status = int(getattr(response, "status", 200))
+                raw_payload = response.read().decode("utf-8")
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:500]
+            raise RuntimeError(
+                f"Lineup model HTTP {exc.code}: {detail or exc.reason}"
+            ) from exc
+        except URLError as exc:
+            raise RuntimeError(
+                f"Lineup model connection failed: {exc.reason}"
+            ) from exc
+        try:
+            payload = json.loads(raw_payload)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Lineup model returned invalid response JSON.") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("Lineup model response must be a JSON object.")
+        return {
+            "status_code": status,
+            "request_id": payload.get("id"),
+            "output": {"choices": payload.get("choices", [])},
+            "usage": payload.get("usage"),
+            "elapsed_seconds": round(time.monotonic() - request_started, 3),
+        }
 
 
 def build_detection_prompt(
@@ -45,6 +146,9 @@ def build_detection_prompt(
     video_name: str,
     window_start_seconds: float,
     window_end_seconds: float,
+    max_coarse_duration_seconds: float = (
+        DEFAULT_MAX_COARSE_LINEUP_DURATION_SECONDS
+    ),
     prompt_path: Path = DEFAULT_PROMPT_PATH,
 ) -> str:
     if not prompt_path.is_file():
@@ -62,6 +166,9 @@ def build_detection_prompt(
         "{VIDEO_NAME}": video_name,
         "{WINDOW_START_SECONDS}": f"{window_start_seconds:.3f}",
         "{WINDOW_END_SECONDS}": f"{window_end_seconds:.3f}",
+        "{MAX_COARSE_LINEUP_DURATION_SECONDS}": (
+            f"{max_coarse_duration_seconds:g}"
+        ),
         "{TRANSCRIPT_JSON}": json.dumps(transcript, ensure_ascii=False),
         "{LINEUP_JSON_SCHEMA}": json.dumps(
             LINEUP_RESPONSE_SCHEMA, ensure_ascii=False
@@ -73,6 +180,36 @@ def build_detection_prompt(
     return prompt
 
 
+def _repair_detection_prompt(
+    base_prompt: str,
+    *,
+    error: LineupDetectionError,
+    payload: dict[str, object] | None,
+    max_coarse_duration_seconds: float,
+) -> str:
+    previous_payload = (
+        json.dumps(payload, ensure_ascii=False)
+        if payload is not None
+        else "null"
+    )
+    return (
+        f"{base_prompt}\n\n"
+        "LƯỢT SỬA BẮT BUỘC:\n"
+        f"Phản hồi JSON trước bị validator từ chối: {error}\n"
+        f"Phản hồi JSON trước: {previous_payload}\n"
+        "Hãy trả lại TOÀN BỘ JSON đã sửa, không giải thích. Không lặp lại lỗi "
+        "trên. Mỗi anchor phải là một chuỗi con chép nguyên văn từ đúng evidence, "
+        "kể cả dấu câu và chính tả ASR. Mỗi block phải liên tục, tập trung vào "
+        "roster trực tiếp và có độ dài thô không quá "
+        f"{max_coarse_duration_seconds:g} giây. Nếu block trước quá dài hoặc đi "
+        "qua nghi lễ/phân tích, hãy ưu tiên DỜI START tới câu tái giới thiệu "
+        "lineup trực tiếp, dày đặc, muộn hơn. Không được cắt bỏ phần roster hoặc "
+        "formation trực tiếp hợp lệ ở cuối chỉ để vượt validation. Trường reason "
+        "chỉ được tóm tắt quyết định cuối trong tối đa hai câu; không ghi lại quá "
+        "trình suy luận hoặc các phương án đã loại.\n"
+    )
+
+
 def _response_payload(response: object) -> dict[str, object]:
     try:
         message = qwen_message(response, operation="Qwen lineup detection")
@@ -81,6 +218,10 @@ def _response_payload(response: object) -> dict[str, object]:
     raw_text = qwen_message_text(message)
     if not raw_text:
         raise LineupDetectionError("Qwen returned an empty lineup response.")
+    if raw_text.startswith("```") and raw_text.endswith("```"):
+        lines = raw_text.splitlines()
+        if len(lines) >= 3 and lines[0].strip().casefold() in {"```", "```json"}:
+            raw_text = "\n".join(lines[1:-1]).strip()
     try:
         payload = json.loads(raw_text)
     except json.JSONDecodeError as exc:
@@ -96,22 +237,39 @@ def _response_payload(response: object) -> dict[str, object]:
     return payload
 
 
+def _response_metrics(response: object) -> dict[str, object]:
+    metrics: dict[str, object] = {}
+    usage = response_to_plain(response_field(response, "usage"))
+    if isinstance(usage, dict):
+        metrics["usage"] = usage
+    elapsed = response_field(response, "elapsed_seconds")
+    if isinstance(elapsed, (int, float)):
+        metrics["elapsed_seconds"] = round(float(elapsed), 3)
+    request_id = response_field(response, "request_id")
+    if request_id:
+        metrics["request_id"] = str(request_id)
+    return metrics
+
+
 class QwenLineupDetector:
     def __init__(
         self,
         *,
         api_key: str | None = None,
         model: str = DEFAULT_TEXT_MODEL,
-        base_url: str = DEFAULT_BASE_URL,
+        base_url: str = DEFAULT_TEXT_BASE_URL,
         client: object | None = None,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
         retry_delay_seconds: float = DEFAULT_RETRY_DELAY_SECONDS,
         expected_segment_count: int | None = None,
+        max_coarse_duration_seconds: float = (
+            DEFAULT_MAX_COARSE_LINEUP_DURATION_SECONDS
+        ),
     ) -> None:
         if not model.strip():
             raise LineupDetectionError("Qwen text model cannot be empty.")
         if not base_url.strip():
-            raise LineupDetectionError("DashScope base URL cannot be empty.")
+            raise LineupDetectionError("Lineup model base URL cannot be empty.")
         if max_attempts <= 0 or retry_delay_seconds < 0:
             raise LineupDetectionError(
                 "Qwen retry attempts must be positive and delay non-negative."
@@ -120,12 +278,20 @@ class QwenLineupDetector:
             raise LineupDetectionError(
                 "Expected lineup segment count must be positive."
             )
+        if (
+            not math.isfinite(max_coarse_duration_seconds)
+            or max_coarse_duration_seconds <= 0
+        ):
+            raise LineupDetectionError(
+                "Maximum coarse lineup duration must be positive."
+            )
         self.api_key = api_key
         self.model = model
         self.base_url = base_url
         self.max_attempts = max_attempts
         self.retry_delay_seconds = retry_delay_seconds
         self.expected_segment_count = expected_segment_count
+        self.max_coarse_duration_seconds = max_coarse_duration_seconds
         self.client = (
             client
             if client is not None
@@ -134,18 +300,7 @@ class QwenLineupDetector:
 
     @staticmethod
     def _create_client(api_key: str | None, base_url: str) -> object:
-        if not api_key:
-            raise LineupDetectionError(
-                "Missing DASHSCOPE_API_KEY environment variable."
-            )
-        try:
-            import dashscope
-        except ModuleNotFoundError as exc:
-            raise LineupDetectionError(
-                "dashscope is not installed. Install requirements.txt first."
-            ) from exc
-        dashscope.base_http_api_url = base_url
-        return dashscope.Generation
+        return OpenAICompatibleLineupClient(base_url=base_url, api_key=api_key)
 
     def detect(
         self,
@@ -168,6 +323,7 @@ class QwenLineupDetector:
             video_name=video_name,
             window_start_seconds=window_start_seconds,
             window_end_seconds=window_end_seconds,
+            max_coarse_duration_seconds=self.max_coarse_duration_seconds,
             prompt_path=prompt_path,
         )
         evidence_bounds = {
@@ -182,10 +338,14 @@ class QwenLineupDetector:
         }
         last_error: LineupDetectionError | None = None
         attempt_log: list[dict[str, object]] = []
+        attempt_prompt = prompt
         for attempt in range(1, self.max_attempts + 1):
             payload: dict[str, object] | None = None
+            metrics: dict[str, object] = {}
             try:
-                payload = _response_payload(self._generate(prompt))
+                response = self._generate(attempt_prompt)
+                metrics = _response_metrics(response)
+                payload = _response_payload(response)
                 result = parse_detection_result(
                     payload,
                     model=self.model,
@@ -194,6 +354,9 @@ class QwenLineupDetector:
                     evidence_texts=evidence_texts,
                     window_start=window_start_seconds,
                     window_end=window_end_seconds,
+                    max_segment_duration_seconds=(
+                        self.max_coarse_duration_seconds
+                    ),
                 )
                 count = len(result.segments)
                 rejected_candidates = result.raw_response.get(
@@ -219,7 +382,11 @@ class QwenLineupDetector:
                     status = "incomplete"
                 raw_response = dict(result.raw_response)
                 raw_response["_validation_attempts"] = attempt_log + [
-                    {"attempt": attempt, "status": "accepted"}
+                    {
+                        "attempt": attempt,
+                        "status": "accepted",
+                        **metrics,
+                    }
                 ]
                 completed = replace(
                     result,
@@ -256,10 +423,22 @@ class QwenLineupDetector:
                         "status": "invalid_payload",
                         "error": str(exc),
                         "payload": payload,
+                        **metrics,
                     }
                 )
                 if attempt >= self.max_attempts:
-                    raise
+                    raise QwenLineupValidationError(
+                        str(exc),
+                        attempt_log,
+                    ) from exc
+                attempt_prompt = _repair_detection_prompt(
+                    prompt,
+                    error=exc,
+                    payload=payload,
+                    max_coarse_duration_seconds=(
+                        self.max_coarse_duration_seconds
+                    ),
+                )
                 print(
                     "Invalid Qwen lineup payload; regenerating "
                     f"({attempt + 1}/{self.max_attempts}): {exc}"
@@ -284,11 +463,11 @@ class QwenLineupDetector:
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
             "result_format": "message",
+            "temperature": 0.0,
+            "max_tokens": 2048,
             "response_format": {"type": "json_object"},
+            "enable_thinking": False,
         }
-        if self.api_key:
-            call_kwargs["api_key"] = self.api_key
-
         try:
             response = self.client.call(**call_kwargs)  # type: ignore[attr-defined]
             ensure_qwen_success(response, operation="Qwen lineup detection")

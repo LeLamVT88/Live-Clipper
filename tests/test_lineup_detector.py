@@ -15,12 +15,20 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from lineup.detector import (
+    DEFAULT_MAX_COARSE_LINEUP_DURATION_SECONDS,
+    DEFAULT_TEXT_BASE_URL,
+    DEFAULT_TEXT_MODEL,
     LineupDetectionError,
+    OpenAICompatibleLineupClient,
     QwenLineupDetector,
+    _response_payload,
     build_detection_prompt,
     write_lineup_csv,
 )
-from lineup.detect_from_transcript import build_parser as build_detection_parser
+from lineup.detect_from_transcript import (
+    _request_summary,
+    build_parser as build_detection_parser,
+)
 from lineup.schema import parse_detection_result
 from transcript.schema import TranscriptSegment
 
@@ -55,6 +63,19 @@ class FakeQwenClient:
                 ]
             },
         )
+
+
+class SequenceQwenClient(FakeQwenClient):
+    def __init__(self, payloads: list[dict[str, object]]) -> None:
+        if not payloads:
+            raise ValueError("payloads cannot be empty")
+        super().__init__(payloads[-1])
+        self.payloads = payloads
+
+    def call(self, **kwargs: object) -> object:
+        payload_index = min(len(self.calls), len(self.payloads) - 1)
+        self.payload = self.payloads[payload_index]
+        return super().call(**kwargs)
 
 
 def transcript_segment(
@@ -129,6 +150,9 @@ class LineupDetectorTests(unittest.TestCase):
         self.assertEqual(call["model"], "qwen-test")
         self.assertEqual(call["result_format"], "message")
         self.assertEqual(call["response_format"], {"type": "json_object"})
+        self.assertFalse(call["enable_thinking"])
+        self.assertIsInstance(call["messages"][0]["content"], str)
+        self.assertEqual(call["temperature"], 0.0)
         self.assertIn("chunk_001_seg_0001", str(call["messages"]))
 
         with tempfile.TemporaryDirectory() as directory:
@@ -145,6 +169,80 @@ class LineupDetectorTests(unittest.TestCase):
             json.loads(rows[0]["evidence_segment_ids"]),
             ["chunk_001_seg_0001", "chunk_001_seg_0002"],
         )
+
+    def test_openai_compatible_client_sends_one_text_only_request(self) -> None:
+        captured: dict[str, object] = {}
+
+        class FakeHTTPResponse:
+            status = 200
+
+            def __enter__(self) -> "FakeHTTPResponse":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            @staticmethod
+            def read() -> bytes:
+                return json.dumps(
+                    {
+                        "id": "local-request",
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": '{"lineup_segments": []}'
+                                }
+                            }
+                        ],
+                    }
+                ).encode("utf-8")
+
+        def fake_open(request: object, *, timeout: float) -> FakeHTTPResponse:
+            captured["url"] = request.full_url  # type: ignore[attr-defined]
+            captured["body"] = json.loads(  # type: ignore[attr-defined]
+                request.data.decode("utf-8")
+            )
+            captured["timeout"] = timeout
+            return FakeHTTPResponse()
+
+        client = OpenAICompatibleLineupClient(
+            base_url="http://localhost:8000/v1/",
+            opener=fake_open,
+        )
+        response = client.call(
+            model=DEFAULT_TEXT_MODEL,
+            messages=[{"role": "user", "content": "transcript text"}],
+            temperature=0.0,
+            max_tokens=2048,
+            result_format="message",
+            response_format={"type": "json_object"},
+            enable_thinking=False,
+        )
+
+        self.assertEqual(captured["url"], "http://localhost:8000/v1/chat/completions")
+        self.assertEqual(captured["body"]["messages"][0]["content"], "transcript text")
+        self.assertNotIn("result_format", captured["body"])
+        self.assertEqual(
+            captured["body"]["response_format"], {"type": "json_object"}
+        )
+        self.assertFalse(captured["body"]["enable_thinking"])
+        self.assertEqual(response["status_code"], 200)
+
+    def test_accepts_json_wrapped_in_a_single_markdown_fence(self) -> None:
+        response = SimpleNamespace(
+            status_code=200,
+            output={
+                "choices": [
+                    {
+                        "message": {
+                            "content": "```json\n{\"lineup_segments\": []}\n```"
+                        }
+                    }
+                ]
+            },
+        )
+
+        self.assertEqual(_response_payload(response), {"lineup_segments": []})
 
     def test_rejects_evidence_not_present_in_transcript(self) -> None:
         client = FakeQwenClient(
@@ -240,6 +338,160 @@ class LineupDetectorTests(unittest.TestCase):
         self.assertAlmostEqual(result.segments[0].start_seconds, expected_start)
         self.assertAlmostEqual(result.segments[0].end_seconds, expected_end)
 
+    def test_matches_anchor_words_across_punctuation_differences(self) -> None:
+        text = "Starting eleven: goalkeeper A, defenders B-C and D."
+        transcript = (
+            transcript_segment("chunk_000_seg_0001", 0.0, 60.0, text),
+        )
+        client = FakeQwenClient(
+            {
+                "lineup_segments": [
+                    {
+                        "start_seconds": 0.0,
+                        "end_seconds": 60.0,
+                        "confidence": 0.9,
+                        "context": "lineup_presentation",
+                        "team_name": "Team A",
+                        "evidence_segment_ids": ["chunk_000_seg_0001"],
+                        "reason": "Direct roster presentation.",
+                        "start_anchor_text": (
+                            "Starting eleven goalkeeper A"
+                        ),
+                        "end_anchor_text": "defenders B C and D",
+                    }
+                ]
+            }
+        )
+
+        result = QwenLineupDetector(model="qwen-test", client=client).detect(
+            transcript,
+            video_name="match.mp4",
+            window_start_seconds=0.0,
+            window_end_seconds=60.0,
+        )
+
+        self.assertEqual(len(result.segments), 1)
+        self.assertLess(result.segments[0].end_seconds, 60.0)
+
+    def test_recovers_uniquely_missing_evidence_for_an_exact_anchor(self) -> None:
+        transcript = (
+            transcript_segment(
+                "chunk_008_seg_0001",
+                480.0,
+                510.0,
+                "Al Nassr make two changes to their starting lineup.",
+            ),
+            transcript_segment(
+                "chunk_009_seg_0001",
+                510.0,
+                540.0,
+                "Sadio Mane and John Duran return to the front line.",
+            ),
+        )
+        client = FakeQwenClient(
+            {
+                "lineup_segments": [
+                    {
+                        "start_seconds": 480.0,
+                        "end_seconds": 540.0,
+                        "confidence": 0.9,
+                        "context": "lineup_presentation",
+                        "team_name": "Al Nassr",
+                        # Qwen omitted the segment containing the end anchor.
+                        "evidence_segment_ids": ["chunk_008_seg_0001"],
+                        "start_anchor_text": (
+                            "Al Nassr make two changes to their starting lineup"
+                        ),
+                        "end_anchor_text": (
+                            "Sadio Mane and John Duran return to the front line"
+                        ),
+                        "reason": "A continuous direct roster presentation.",
+                    }
+                ]
+            }
+        )
+
+        result = QwenLineupDetector(model="qwen-test", client=client).detect(
+            transcript,
+            video_name="match.mp4",
+            window_start_seconds=480.0,
+            window_end_seconds=540.0,
+        )
+
+        self.assertEqual(
+            result.segments[0].evidence_segment_ids,
+            ("chunk_008_seg_0001", "chunk_009_seg_0001"),
+        )
+        self.assertGreater(result.segments[0].end_seconds, 510.0)
+
+    def test_regenerates_a_coarse_lineup_longer_than_the_limit(self) -> None:
+        text = (
+            "Lineup begins. "
+            + "background words " * 80
+            + "Compact direct roster."
+        )
+        transcript = (
+            transcript_segment("chunk_000_seg_0001", 0.0, 120.0, text),
+        )
+        common = {
+            "start_seconds": 0.0,
+            "end_seconds": 120.0,
+            "confidence": 0.9,
+            "context": "lineup_presentation",
+            "team_name": "Team A",
+            "evidence_segment_ids": ["chunk_000_seg_0001"],
+            "reason": "A direct roster presentation.",
+        }
+        client = SequenceQwenClient(
+            [
+                {
+                    "lineup_segments": [
+                        {
+                            **common,
+                            "start_anchor_text": "Lineup begins",
+                            "end_anchor_text": "Compact direct roster",
+                        }
+                    ]
+                },
+                {
+                    "lineup_segments": [
+                        {
+                            **common,
+                            "start_anchor_text": "Compact direct roster",
+                            "end_anchor_text": "Compact direct roster",
+                        }
+                    ]
+                },
+            ]
+        )
+        detector = QwenLineupDetector(
+            model="qwen-test",
+            client=client,
+            max_attempts=2,
+            retry_delay_seconds=0,
+        )
+
+        result = detector.detect(
+            transcript,
+            video_name="match.mp4",
+            window_start_seconds=0.0,
+            window_end_seconds=120.0,
+        )
+
+        self.assertEqual(len(client.calls), 2)
+        repair_prompt = str(client.calls[1]["messages"])
+        self.assertIn("LƯỢT SỬA BẮT BUỘC", repair_prompt)
+        self.assertIn("coarse duration", repair_prompt)
+        self.assertLessEqual(
+            result.segments[0].end_seconds
+            - result.segments[0].start_seconds,
+            DEFAULT_MAX_COARSE_LINEUP_DURATION_SECONDS,
+        )
+        self.assertEqual(
+            result.raw_response["_validation_attempts"][0]["status"],
+            "invalid_payload",
+        )
+
     def test_rejects_anchor_not_copied_from_cited_evidence(self) -> None:
         client = FakeQwenClient(
             {
@@ -307,7 +559,7 @@ class LineupDetectorTests(unittest.TestCase):
             }
         )
 
-        with self.assertRaisesRegex(LineupDetectionError, "distinct teams"):
+        with self.assertRaisesRegex(LineupDetectionError, "coarse duration"):
             QwenLineupDetector(model="qwen-test", client=client).detect(
                 transcript,
                 video_name="match.mp4",
@@ -340,6 +592,65 @@ class LineupDetectorTests(unittest.TestCase):
         )
 
         self.assertIsNone(args.expected_lineups)
+
+    def test_cli_defaults_to_qwen_plus_without_short_asr_options(self) -> None:
+        parser = build_detection_parser()
+        args = parser.parse_args(["--transcript", "transcript.jsonl"])
+
+        self.assertEqual(DEFAULT_TEXT_MODEL, "qwen-plus")
+        self.assertEqual(
+            DEFAULT_TEXT_BASE_URL,
+            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        )
+        self.assertIsNone(args.model)
+        self.assertEqual(
+            args.max_coarse_duration,
+            DEFAULT_MAX_COARSE_LINEUP_DURATION_SECONDS,
+        )
+        self.assertTrue(args.scene_snap)
+        self.assertFalse(args.scene_slideshow)
+        self.assertIsNone(args.output)
+        option_names = {action.dest for action in parser._actions}
+        self.assertNotIn("subchunk_duration", option_names)
+        self.assertNotIn("workers", option_names)
+        self.assertNotIn("refinement_dir", option_names)
+
+    def test_summarizes_lineup_request_usage_and_elapsed_time(self) -> None:
+        summary = _request_summary(
+            {
+                "_validation_attempts": [
+                    {
+                        "attempt": 1,
+                        "elapsed_seconds": 1.25,
+                        "usage": {
+                            "prompt_tokens": 100,
+                            "completion_tokens": 20,
+                            "total_tokens": 120,
+                        },
+                    },
+                    {
+                        "attempt": 2,
+                        "elapsed_seconds": 0.75,
+                        "usage": {
+                            "prompt_tokens": 100,
+                            "completion_tokens": 30,
+                            "total_tokens": 130,
+                        },
+                    },
+                ]
+            }
+        )
+
+        self.assertEqual(summary["request_count"], 2)
+        self.assertEqual(summary["elapsed_seconds"], 2.0)
+        self.assertEqual(
+            summary["usage"],
+            {
+                "prompt_tokens": 200,
+                "completion_tokens": 50,
+                "total_tokens": 250,
+            },
+        )
 
     def test_rejects_overlapping_lineups_for_distinct_teams(self) -> None:
         text = "Alpha lineup begins and ends. Beta lineup begins and ends."
@@ -422,8 +733,12 @@ class LineupDetectorTests(unittest.TestCase):
         self.assertIn("hai kết quả riêng", prompt)
         self.assertIn("Player walkout/ceremonial introduction", prompt)
         self.assertIn("Evidence của một kết quả phải liên tục", prompt)
-        self.assertIn("lưu nguyên trạng", prompt)
+        self.assertIn("PySceneDetect", prompt)
         self.assertIn("start_anchor_text", prompt)
+        self.assertIn("ngữ cảnh nhân sự mở rộng", prompt)
+        self.assertIn("C reintroduced into midfield", prompt)
+        self.assertIn("không được dài quá", prompt)
+        self.assertIn("`75` giây", prompt)
         self.assertIn('"required": ["lineup_segments"]', prompt)
         self.assertNotIn("{LINEUP_JSON_SCHEMA}", prompt)
         self.assertNotIn("07:22", prompt)
@@ -554,6 +869,47 @@ class LineupDetectorTests(unittest.TestCase):
 
         self.assertEqual(len(result.segments), 1)
         self.assertEqual(result.segments[0].team_name, "Team A")
+
+    def test_rejects_candidate_spanning_a_coming_out_ceremony(self) -> None:
+        text = (
+            "A preliminary lineup fragment. Players will be coming out. "
+            "Players coming through the line. Frontale coach makes three "
+            "changes to the starting eleven."
+        )
+        transcript = (
+            transcript_segment("chunk_001_seg_0001", 300.0, 360.0, text),
+        )
+        client = FakeQwenClient(
+            {
+                "lineup_segments": [
+                    {
+                        "team_name": "Frontale",
+                        "start_seconds": 300.0,
+                        "end_seconds": 360.0,
+                        "confidence": 0.9,
+                        "context": "lineup_presentation",
+                        "evidence_segment_ids": ["chunk_001_seg_0001"],
+                        "start_anchor_text": (
+                            "A preliminary lineup fragment"
+                        ),
+                        "end_anchor_text": (
+                            "makes three changes to the starting eleven"
+                        ),
+                        "reason": "The model merged ceremony and roster.",
+                    }
+                ]
+            }
+        )
+
+        result = QwenLineupDetector(model="qwen-test", client=client).detect(
+            transcript,
+            video_name="match.mp4",
+            window_start_seconds=0.0,
+            window_end_seconds=600.0,
+        )
+
+        self.assertEqual(result.segments, tuple())
+        self.assertEqual(len(result.raw_response["_rejected_candidates"]), 1)
 
     def test_marks_incomplete_without_regenerating_to_force_count(self) -> None:
         client = FakeQwenClient(

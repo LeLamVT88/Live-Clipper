@@ -16,12 +16,19 @@ from lineup.export_clips import (
     ClipExportError,
     ClipJob,
     load_segments,
+    parse_args,
     validate_jobs,
 )
 from transcript.audio import MediaInfo
 
 
 class ClipExportValidationTests(unittest.TestCase):
+    def test_cli_infers_output_dir_from_the_required_segments_csv(self) -> None:
+        args = parse_args(["--segments-csv", "lineup_segments.csv"])
+
+        self.assertEqual(args.segments_csv, Path("lineup_segments.csv"))
+        self.assertIsNone(args.output_dir)
+
     def test_loads_coarse_lineup_csv_directly(self) -> None:
         csv_text = "video,start_seconds,end_seconds\nmatch.mp4,10,20\n"
         with tempfile.TemporaryDirectory() as directory:

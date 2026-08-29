@@ -19,8 +19,8 @@ from dotenv import load_dotenv
 
 from lineup.utils import (
     PROJECT_ROOT,
+    default_run_dir,
     resolve_project_path,
-    safe_stem,
     timestamp_to_seconds,
 )
 from transcript.audio import (
@@ -106,7 +106,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        help="Run directory; defaults to outputs/runs/<video-stem>.",
+        help=(
+            "Run directory. By default, mirrors the video path below "
+            "data/raw_data directly under outputs."
+        ),
     )
     parser.add_argument("--ffmpeg", default="ffmpeg")
     parser.add_argument("--ffprobe", default="ffprobe")
@@ -472,7 +475,7 @@ def main(argv: list[str] | None = None) -> int:
         run_dir = (
             resolve_project_path(args.output_dir)
             if args.output_dir is not None
-            else PROJECT_ROOT / "outputs" / "runs" / safe_stem(video_path.stem)
+            else default_run_dir(video_path)
         )
         result, chunk_metadata, chunk_count = _transcribe_chunks(
             args,

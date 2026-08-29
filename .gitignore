@@ -16,9 +16,4 @@ venv/
 data/raw_data/**
 !data/raw_data/.gitkeep
 
-outputs/clips/**
-!outputs/clips/.gitkeep
-outputs/predictions/**
-!outputs/predictions/.gitkeep
-outputs/runs/**
-!outputs/runs/.gitkeep
+outputs/**

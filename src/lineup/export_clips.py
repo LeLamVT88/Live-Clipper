@@ -21,6 +21,7 @@ from transcript.audio import AudioExtractionError, probe_media
 
 from lineup.utils import (
     PROJECT_ROOT,
+    default_lineup_clip_dir,
     ensure_dir,
     lineup_clip_name,
     resolve_project_path,
@@ -28,17 +29,7 @@ from lineup.utils import (
 )
 
 
-DEFAULT_SEGMENTS_CSV = (
-    PROJECT_ROOT
-    / "outputs"
-    / "predictions"
-    / "lineup"
-    / "lineup_segments.csv"
-)
 DEFAULT_VIDEO_DIR = PROJECT_ROOT / "data" / "raw_data"
-DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "clips"
-
-
 class ClipExportError(Exception):
     """Raised when clip export input or FFmpeg execution is invalid."""
 
@@ -58,13 +49,25 @@ class ClipJob:
         return self.end_seconds - self.start_seconds
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Export detected lineup segments as MP4 clips with FFmpeg."
     )
-    parser.add_argument("--segments-csv", type=Path, default=DEFAULT_SEGMENTS_CSV)
+    parser.add_argument(
+        "--segments-csv",
+        type=Path,
+        required=True,
+        help="lineup_segments.csv created by lineup detection.",
+    )
     parser.add_argument("--video-dir", type=Path, default=DEFAULT_VIDEO_DIR)
-    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        help=(
+            "Clip directory. Defaults to clips/lineup inside the run that "
+            "contains --segments-csv."
+        ),
+    )
     parser.add_argument(
         "--ffmpeg",
         default="ffmpeg",
@@ -86,7 +89,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="Defaults to export_manifest.json inside the output directory.",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def load_segments(csv_path: Path) -> pd.DataFrame:
@@ -402,7 +405,11 @@ def main() -> int:
     try:
         segments_csv = resolve_project_path(args.segments_csv)
         video_dir = resolve_project_path(args.video_dir)
-        output_dir = resolve_project_path(args.output_dir)
+        output_dir = resolve_project_path(
+            args.output_dir
+            if args.output_dir is not None
+            else default_lineup_clip_dir(segments_csv)
+        )
         manifest_path = resolve_project_path(
             args.manifest
             if args.manifest is not None
