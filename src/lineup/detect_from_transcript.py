@@ -1,4 +1,4 @@
-"""CLI: detect lineups from coarse transcript, then align to scene graphics."""
+"""CLI: detect coarse lineups, confirm them with OCR, then export timestamps."""
 
 from __future__ import annotations
 
@@ -24,18 +24,20 @@ from lineup.detector import (
     write_lineup_csv,
 )
 from lineup.scene_detection import (
-    DEFAULT_MAX_AUDIO_END_LEAD_SECONDS,
-    DEFAULT_MAX_GRAPHIC_DURATION_SECONDS,
-    DEFAULT_SCENE_MIN_LENGTH_FRAMES,
+    DEFAULT_SCENE_MIN_LENGTH_SECONDS,
     DEFAULT_SCENE_SNAP_RADIUS_SECONDS,
     DEFAULT_SCENE_THRESHOLD,
-    detect_scene_cuts,
-    snap_lineup_result,
 )
+from lineup.schema import parse_detection_result
 from lineup.utils import (
     PROJECT_ROOT,
     default_lineup_prediction_dir,
     resolve_project_path,
+)
+from lineup.visual_refinement import (
+    DEFAULT_OCR_PYTHON,
+    MAX_SCAN_SECONDS,
+    refine_with_visual_ocr,
 )
 from transcript.schema import TranscriptValidationError, read_jsonl, write_json
 
@@ -61,7 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Detect football starting-lineup intervals with one text-only "
-            "Qwen call over the coarse transcript, then PySceneDetect."
+            "Qwen call, tiny OCR over scene representatives, and PySceneDetect."
         )
     )
     parser.add_argument("--transcript", type=Path, required=True)
@@ -112,10 +114,24 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--no-scene-snap",
+        "--no-ocr",
         action="store_false",
-        dest="scene_snap",
-        help="Keep Qwen coarse boundaries without PySceneDetect alignment.",
+        dest="visual_ocr",
+        help="Keep Qwen coarse boundaries without OCR/PySceneDetect refinement.",
+    )
+    parser.add_argument(
+        "--reuse-coarse",
+        action="store_true",
+        help=(
+            "Reuse lineup_segments from the existing raw output and rerun only "
+            "OCR/PySceneDetect. Requires --overwrite and avoids another Qwen call."
+        ),
+    )
+    parser.add_argument(
+        "--ocr-python",
+        type=Path,
+        default=Path(os.getenv("LINEUP_OCR_PYTHON", str(DEFAULT_OCR_PYTHON))),
+        help="Python executable containing PaddleOCR; default is .venv-ocr.",
     )
     parser.add_argument(
         "--scene-threshold",
@@ -126,14 +142,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--scene-min-length-frames",
         type=int,
-        default=DEFAULT_SCENE_MIN_LENGTH_FRAMES,
-        help="Minimum PySceneDetect scene length in frames; default is 15.",
+        default=None,
+        help=(
+            "Explicit PySceneDetect minimum scene length in frames. By default "
+            "the FPS-independent --scene-min-length-seconds value is used."
+        ),
+    )
+    parser.add_argument(
+        "--scene-min-length-seconds",
+        type=float,
+        default=DEFAULT_SCENE_MIN_LENGTH_SECONDS,
+        help="FPS-independent minimum scene length; default is 0.5 seconds.",
     )
     parser.add_argument(
         "--scene-snap-radius",
         type=float,
         default=DEFAULT_SCENE_SNAP_RADIUS_SECONDS,
-        help="Maximum distance from a coarse boundary to a scene cut; default is 4s.",
+        help="Maximum final OCR-boundary adjustment to a scene cut; default is 4s.",
     )
     parser.add_argument(
         "--output",
@@ -146,11 +171,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--raw-output", type=Path)
     parser.add_argument("--metadata-output", type=Path)
     parser.add_argument("--overwrite", action="store_true")
-    parser.add_argument(
-        "--scene-slideshow",
-        action="store_true",
-        help="Use consecutive-slide scene pairing for broadcasts with roster slides.",
-    )
     return parser
 
 
@@ -191,7 +211,12 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     load_dotenv(PROJECT_ROOT / ".env")
     try:
-        if args.scene_threshold <= 0 or args.scene_min_length_frames <= 0:
+        if args.scene_threshold <= 0 or args.scene_min_length_seconds <= 0:
+            raise LineupDetectionError("Scene detector values must be positive.")
+        if (
+            args.scene_min_length_frames is not None
+            and args.scene_min_length_frames <= 0
+        ):
             raise LineupDetectionError("Scene detector values must be positive.")
         if args.scene_snap_radius < 0:
             raise LineupDetectionError("--scene-snap-radius cannot be negative.")
@@ -218,7 +243,7 @@ def main(argv: list[str] | None = None) -> int:
         window_start = float(
             transcription_metadata.get("source_start_seconds", 0.0)
         )
-        window_end = float(
+        metadata_window_end = float(
             transcription_metadata.get(
                 "processed_end_seconds",
                 transcription_metadata.get(
@@ -228,6 +253,11 @@ def main(argv: list[str] | None = None) -> int:
                 ),
             )
         )
+        window_end = min(metadata_window_end, MAX_SCAN_SECONDS)
+        if window_start >= window_end:
+            raise LineupDetectionError(
+                "The transcript window does not overlap the first 600 seconds."
+            )
 
         output_path = resolve_project_path(
             args.output
@@ -268,26 +298,78 @@ def main(argv: list[str] | None = None) -> int:
             or os.getenv("QWEN_LINEUP_BASE_URL")
             or DEFAULT_TEXT_BASE_URL
         )
-        transcript = read_jsonl(transcript_path)
-        print(
-            f"Detecting lineup in {len(transcript)} coarse transcript chunk(s), "
-            f"window {window_start:.3f}-{window_end:.3f}s with {model}"
+        transcript = tuple(
+            segment
+            for segment in read_jsonl(transcript_path)
+            if segment.start_seconds < window_end
+            and segment.end_seconds <= window_end + 1e-6
         )
-        result = QwenLineupDetector(
-            api_key=api_key,
-            expected_segment_count=args.expected_lineups,
-            model=model,
-            base_url=base_url,
-            max_coarse_duration_seconds=args.max_coarse_duration,
-        ).detect(
-            transcript,
-            video_name=video_name,
-            window_start_seconds=window_start,
-            window_end_seconds=window_end,
-        )
-        scene_refinement_ran = False
+        if args.reuse_coarse:
+            if not args.overwrite:
+                raise LineupDetectionError(
+                    "--reuse-coarse requires --overwrite because it reads and "
+                    "replaces the existing detection outputs."
+                )
+            if not raw_output_path.is_file():
+                raise LineupDetectionError(
+                    f"Existing coarse raw output does not exist: {raw_output_path}"
+                )
+            saved_payload = json.loads(raw_output_path.read_text(encoding="utf-8"))
+            if not isinstance(saved_payload, dict):
+                raise LineupDetectionError(
+                    "Existing coarse raw output must be a JSON object."
+                )
+            coarse_payload = {
+                key: value
+                for key, value in saved_payload.items()
+                if key not in {"visual_refinement", "_review_reasons"}
+            }
+            evidence_bounds = {
+                segment.segment_id: (segment.start_seconds, segment.end_seconds)
+                for segment in transcript
+            }
+            evidence_texts = {
+                segment.segment_id: segment.text for segment in transcript
+            }
+            result = parse_detection_result(
+                coarse_payload,
+                model=model,
+                known_evidence=evidence_bounds,
+                evidence_bounds=evidence_bounds,
+                evidence_texts=evidence_texts,
+                window_start=window_start,
+                window_end=window_end,
+                max_segment_duration_seconds=args.max_coarse_duration,
+                # The saved response already passed validation. Older runs
+                # predate the explicit kickoff field, so do not reject them
+                # when rerunning only the visual stage.
+                require_kickoff_field=False,
+            )
+            print(
+                f"Reusing {len(result.segments)} coarse lineup candidate(s); "
+                "no Qwen request"
+            )
+        else:
+            print(
+                f"Detecting lineup in {len(transcript)} coarse transcript chunk(s), "
+                f"window {window_start:.3f}-{window_end:.3f}s with {model}"
+            )
+            result = QwenLineupDetector(
+                api_key=api_key,
+                expected_segment_count=args.expected_lineups,
+                model=model,
+                base_url=base_url,
+                max_coarse_duration_seconds=args.max_coarse_duration,
+                require_kickoff_field=True,
+            ).detect(
+                transcript,
+                video_name=video_name,
+                window_start_seconds=window_start,
+                window_end_seconds=window_end,
+            )
+        visual_refinement_ran = False
         source_video_path: Path | None = None
-        if args.scene_snap and result.segments:
+        if args.visual_ocr:
             source_value = args.source_video or (
                 Path(metadata_source) if metadata_source else None
             )
@@ -301,52 +383,38 @@ def main(argv: list[str] | None = None) -> int:
                 raise LineupDetectionError(
                     f"Source video does not exist: {source_video_path}"
                 )
-            margin = max(
-                args.scene_snap_radius + 1.0,
-                DEFAULT_MAX_GRAPHIC_DURATION_SECONDS + 1.0,
-            )
-            scan_start = max(
-                0.0,
-                min(segment.start_seconds for segment in result.segments) - margin,
-            )
-            scan_end = max(
-                max(
-                    segment.end_seconds + DEFAULT_MAX_AUDIO_END_LEAD_SECONDS,
-                    segment.start_seconds
-                    + DEFAULT_MAX_GRAPHIC_DURATION_SECONDS
-                    + 1.0,
-                )
-                for segment in result.segments
-            )
             source_duration = transcription_metadata.get("source_duration_seconds")
-            if source_duration is not None:
-                scan_end = min(scan_end, float(source_duration))
-            if scan_end > scan_start:
-                print(
-                    f"Aligning coarse Qwen boundaries to PySceneDetect cuts within "
-                    f"{args.scene_snap_radius:g}s"
-                )
-                cuts = detect_scene_cuts(
-                    source_video_path,
-                    start_seconds=scan_start,
-                    end_seconds=scan_end,
-                    threshold=args.scene_threshold,
-                    min_scene_len_frames=args.scene_min_length_frames,
-                )
-                result = snap_lineup_result(
-                    result,
-                    cuts,
-                    radius_seconds=args.scene_snap_radius,
-                    slideshow_mode=args.scene_slideshow,
-                )
-                scene_refinement_ran = True
-                scene_metadata = result.raw_response.get("scene_refinement")
-                if isinstance(scene_metadata, dict):
-                    scene_metadata["threshold"] = args.scene_threshold
-                    scene_metadata["min_scene_length_frames"] = (
-                        args.scene_min_length_frames
-                    )
+            visual_scan_end = min(
+                MAX_SCAN_SECONDS,
+                float(source_duration) if source_duration is not None else window_end,
+            )
+            print(
+                "Confirming lineup graphics with scene-level tiny OCR "
+                f"inside the first {visual_scan_end:g}s"
+            )
+            result = refine_with_visual_ocr(
+                result,
+                video_path=source_video_path,
+                scan_end_seconds=visual_scan_end,
+                expected_count=args.expected_lineups,
+                scene_threshold=args.scene_threshold,
+                scene_min_length_frames=args.scene_min_length_frames,
+                scene_min_length_seconds=args.scene_min_length_seconds,
+                scene_snap_radius_seconds=args.scene_snap_radius,
+                ocr_python=args.ocr_python,
+            )
+            visual_refinement_ran = True
         request_summary = _request_summary(result.raw_response)
+        visual_diagnostics = result.raw_response.get("visual_refinement", {})
+        if not isinstance(visual_diagnostics, dict):
+            visual_diagnostics = {}
+        review_reasons = result.raw_response.get("_review_reasons", [])
+        if not isinstance(review_reasons, list):
+            review_reasons = []
+        requires_review = bool(review_reasons) or (
+            args.expected_lineups is not None
+            and len(result.segments) != args.expected_lineups
+        )
         write_lineup_csv(result, video_name=video_name, output_path=output_path)
         write_json(result.raw_response, raw_output_path)
         write_json(
@@ -355,10 +423,25 @@ def main(argv: list[str] | None = None) -> int:
                 "lineup_api": "openai_compatible",
                 "lineup_base_url": base_url,
                 "model": result.model,
-                "method": "coarse_transcript_qwen_text_plus_pyscenedetect",
+                "method": (
+                    "coarse_transcript_qwen_plus_scene_tiny_ocr_pyscenedetect"
+                    if visual_refinement_ran
+                    else "coarse_transcript_qwen_text"
+                ),
                 "uses_text_llm": True,
+                "coarse_qwen_response_reused": args.reuse_coarse,
                 "uses_visual_llm": False,
-                "uses_pyscenedetect": scene_refinement_ran,
+                "uses_ocr": visual_refinement_ran,
+                "ocr_detection_model": (
+                    "PP-OCRv6_tiny_det" if visual_refinement_ran else None
+                ),
+                "ocr_recognition_model": (
+                    "PP-OCRv6_tiny_rec" if visual_refinement_ran else None
+                ),
+                "ocr_global_fallback_used": bool(
+                    visual_diagnostics.get("fallback_used")
+                ),
+                "uses_pyscenedetect": visual_refinement_ran,
                 "uses_second_pass_asr": False,
                 "video": video_name,
                 "source_video": str(source_video_path or metadata_source),
@@ -380,12 +463,12 @@ def main(argv: list[str] | None = None) -> int:
                 "expected_lineup_segment_count": args.expected_lineups,
                 "detection_status": result.status,
                 "requires_review": (
-                    args.expected_lineups is not None
-                    and len(result.segments) != args.expected_lineups
+                    requires_review
                 ),
+                "review_reasons": review_reasons,
                 "timestamp_precision": (
-                    "coarse_text_anchor_snapped_to_graphic_scene"
-                    if scene_refinement_ran
+                    "scene_representative_ocr_snapped_to_graphic_scene"
+                    if visual_refinement_ran
                     else "coarse_text_anchor_within_sixty_second_chunk"
                 ),
                 "created_at": datetime.now(timezone.utc).isoformat(),

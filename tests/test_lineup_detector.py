@@ -607,13 +607,14 @@ class LineupDetectorTests(unittest.TestCase):
             args.max_coarse_duration,
             DEFAULT_MAX_COARSE_LINEUP_DURATION_SECONDS,
         )
-        self.assertTrue(args.scene_snap)
-        self.assertFalse(args.scene_slideshow)
+        self.assertTrue(args.visual_ocr)
+        self.assertEqual(args.ocr_python.name, "python")
         self.assertIsNone(args.output)
         option_names = {action.dest for action in parser._actions}
         self.assertNotIn("subchunk_duration", option_names)
         self.assertNotIn("workers", option_names)
         self.assertNotIn("refinement_dir", option_names)
+        self.assertNotIn("scene_slideshow", option_names)
 
     def test_summarizes_lineup_request_usage_and_elapsed_time(self) -> None:
         summary = _request_summary(
@@ -739,7 +740,8 @@ class LineupDetectorTests(unittest.TestCase):
         self.assertIn("C reintroduced into midfield", prompt)
         self.assertIn("không được dài quá", prompt)
         self.assertIn("`75` giây", prompt)
-        self.assertIn('"required": ["lineup_segments"]', prompt)
+        self.assertIn('"required": ["kickoff", "lineup_segments"]', prompt)
+        self.assertIn("Trường `kickoff` là bắt buộc", prompt)
         self.assertNotIn("{LINEUP_JSON_SCHEMA}", prompt)
         self.assertNotIn("07:22", prompt)
 
@@ -777,6 +779,234 @@ class LineupDetectorTests(unittest.TestCase):
         self.assertEqual(
             result.raw_response["lineup_segments"][0]["context"],
             "live_play_tactical_analysis",
+        )
+
+    def test_validated_kickoff_rejects_and_regenerates_post_kickoff_lineup(self) -> None:
+        transcript = (
+            TranscriptSegment(
+                segment_id="chunk_000_seg_0001",
+                start_seconds=0.0,
+                end_seconds=60.0,
+                text=(
+                    "Belgium make ten changes. Vincent Kompany starts for the "
+                    "first time in this tournament."
+                ),
+                source_chunk="chunk_000",
+                chunk_start_seconds=0.0,
+            ),
+            TranscriptSegment(
+                segment_id="chunk_002_seg_0001",
+                start_seconds=120.0,
+                end_seconds=180.0,
+                text="Japan kick off and play the ball backwards.",
+                source_chunk="chunk_002",
+                chunk_start_seconds=120.0,
+            ),
+            TranscriptSegment(
+                segment_id="chunk_006_seg_0001",
+                start_seconds=360.0,
+                end_seconds=420.0,
+                text=(
+                    "Belgium are playing with three central defenders and "
+                    "Carrasco is the left wing back."
+                ),
+                source_chunk="chunk_006",
+                chunk_start_seconds=360.0,
+            ),
+        )
+        kickoff = {
+            "evidence_segment_id": "chunk_002_seg_0001",
+            "anchor_text": "Japan kick off and play the ball backwards",
+            "confidence": 0.99,
+        }
+        wrong = {
+            "kickoff": kickoff,
+            "lineup_segments": [
+                {
+                    "team_name": "Belgium",
+                    "start_seconds": 360.0,
+                    "end_seconds": 420.0,
+                    "confidence": 0.9,
+                    "context": "lineup_presentation",
+                    "evidence_segment_ids": ["chunk_006_seg_0001"],
+                    "reason": "A tactical shape is mentioned after kickoff.",
+                    "start_anchor_text": "Belgium are playing with three central defenders",
+                    "end_anchor_text": "Carrasco is the left wing back",
+                }
+            ],
+        }
+        corrected = {
+            "kickoff": kickoff,
+            "lineup_segments": [
+                {
+                    "team_name": "Belgium",
+                    "start_seconds": 0.0,
+                    "end_seconds": 60.0,
+                    "confidence": 0.96,
+                    "context": "lineup_presentation",
+                    "evidence_segment_ids": ["chunk_000_seg_0001"],
+                    "reason": "The pre-kickoff team sheet is presented.",
+                    "start_anchor_text": "Belgium make ten changes",
+                    "end_anchor_text": "starts for the first time in this tournament",
+                }
+            ],
+        }
+        client = SequenceQwenClient([wrong, corrected])
+        detector = QwenLineupDetector(
+            model="qwen-test",
+            client=client,
+            expected_segment_count=1,
+            max_attempts=2,
+            require_kickoff_field=True,
+        )
+
+        result = detector.detect(
+            transcript,
+            video_name="WC_01.mp4",
+            window_start_seconds=0.0,
+            window_end_seconds=420.0,
+        )
+
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(result.segments[0].team_name, "Belgium")
+        self.assertLess(result.segments[0].end_seconds, 120.0)
+        self.assertEqual(
+            result.raw_response["_kickoff_validation"]["status"],
+            "validated",
+        )
+
+    def test_invalid_repair_keeps_the_best_valid_partial_response(self) -> None:
+        transcript = (
+            transcript_segment(
+                "before",
+                0.0,
+                60.0,
+                "Team A make five changes to their starting eleven.",
+            ),
+            transcript_segment(
+                "kickoff",
+                60.0,
+                120.0,
+                "The first half is now under way.",
+            ),
+            transcript_segment(
+                "after",
+                120.0,
+                180.0,
+                "Team B are playing with three central defenders.",
+            ),
+        )
+        kickoff = {
+            "evidence_segment_id": "kickoff",
+            "anchor_text": "The first half is now under way",
+            "confidence": 0.99,
+        }
+        valid_partial = {
+            "kickoff": kickoff,
+            "lineup_segments": [
+                {
+                    "team_name": "Team A",
+                    "start_seconds": 0.0,
+                    "end_seconds": 60.0,
+                    "confidence": 0.9,
+                    "context": "lineup_presentation",
+                    "evidence_segment_ids": ["before"],
+                    "reason": "A pre-kickoff lineup is presented.",
+                    "start_anchor_text": "Team A make five changes",
+                    "end_anchor_text": "to their starting eleven",
+                },
+                {
+                    "team_name": "Team B",
+                    "start_seconds": 120.0,
+                    "end_seconds": 180.0,
+                    "confidence": 0.8,
+                    "context": "lineup_presentation",
+                    "evidence_segment_ids": ["after"],
+                    "reason": "A post-kickoff tactical shape is described.",
+                    "start_anchor_text": "Team B are playing",
+                    "end_anchor_text": "with three central defenders",
+                },
+            ],
+        }
+        invalid_repair = {
+            "kickoff": kickoff,
+            "lineup_segments": [
+                {
+                    **valid_partial["lineup_segments"][0],
+                    "end_anchor_text": "words absent from the transcript",
+                }
+            ],
+        }
+        client = SequenceQwenClient([valid_partial, invalid_repair])
+        detector = QwenLineupDetector(
+            model="qwen-test",
+            client=client,
+            expected_segment_count=2,
+            max_attempts=2,
+            require_kickoff_field=True,
+        )
+
+        result = detector.detect(
+            transcript,
+            video_name="match.mp4",
+            window_start_seconds=0.0,
+            window_end_seconds=180.0,
+        )
+
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(
+            [segment.team_name for segment in result.segments],
+            ["Team A"],
+        )
+        self.assertEqual(result.status, "incomplete")
+        self.assertEqual(
+            result.raw_response["_partial_response_fallback"],
+            "later_qwen_repairs_failed_validation",
+        )
+
+    def test_required_kickoff_field_cannot_be_omitted(self) -> None:
+        with self.assertRaisesRegex(LineupDetectionError, "must contain kickoff"):
+            parse_detection_result(
+                {"lineup_segments": []},
+                model="qwen-test",
+                known_evidence=["s1"],
+                evidence_bounds={"s1": (0.0, 60.0)},
+                evidence_texts={"s1": "No kickoff yet."},
+                window_start=0.0,
+                window_end=60.0,
+                require_kickoff_field=True,
+            )
+
+    def test_kickoff_recovers_a_uniquely_miscited_exact_anchor(self) -> None:
+        result = parse_detection_result(
+            {
+                "kickoff": {
+                    "evidence_segment_id": "after_kickoff",
+                    "anchor_text": "the first half is now under way",
+                    "confidence": 0.95,
+                },
+                "lineup_segments": [],
+            },
+            model="qwen-test",
+            known_evidence=["kickoff", "after_kickoff"],
+            evidence_bounds={
+                "kickoff": (60.0, 120.0),
+                "after_kickoff": (120.0, 180.0),
+            },
+            evidence_texts={
+                "kickoff": "The first half is now under way.",
+                "after_kickoff": "The home side keep the ball.",
+            },
+            window_start=0.0,
+            window_end=180.0,
+            require_kickoff_field=True,
+        )
+
+        validation = result.raw_response["_kickoff_validation"]
+        self.assertEqual(validation["evidence_segment_id"], "kickoff")
+        self.assertEqual(
+            validation["evidence_segment_id_repaired_from"],
+            "after_kickoff",
         )
 
     def test_filters_ceremonial_walkout_but_not_last_outing(self) -> None:

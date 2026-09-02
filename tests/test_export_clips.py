@@ -16,6 +16,7 @@ from lineup.export_clips import (
     ClipExportError,
     ClipJob,
     load_segments,
+    load_detection_review,
     parse_args,
     validate_jobs,
 )
@@ -23,6 +24,22 @@ from transcript.audio import MediaInfo
 
 
 class ClipExportValidationTests(unittest.TestCase):
+    def test_loads_semantic_review_state_from_detection_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lineup_dir = Path(directory) / "predictions" / "lineup"
+            lineup_dir.mkdir(parents=True)
+            segments = lineup_dir / "lineup_segments.csv"
+            segments.write_text("video,start_seconds,end_seconds\n", encoding="utf-8")
+            (lineup_dir / "detection_metadata.json").write_text(
+                '{"requires_review": true, "review_reasons": ["large_shift"]}',
+                encoding="utf-8",
+            )
+
+            requires_review, reasons = load_detection_review(segments)
+
+        self.assertTrue(requires_review)
+        self.assertEqual(reasons, ["large_shift"])
+
     def test_cli_infers_output_dir_from_the_required_segments_csv(self) -> None:
         args = parse_args(["--segments-csv", "lineup_segments.csv"])
 

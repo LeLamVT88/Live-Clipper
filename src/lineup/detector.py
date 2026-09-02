@@ -198,7 +198,9 @@ def _repair_detection_prompt(
         f"Phản hồi JSON trước bị validator từ chối: {error}\n"
         f"Phản hồi JSON trước: {previous_payload}\n"
         "Hãy trả lại TOÀN BỘ JSON đã sửa, không giải thích. Không lặp lại lỗi "
-        "trên. Mỗi anchor phải là một chuỗi con chép nguyên văn từ đúng evidence, "
+        "trên. Trường kickoff bắt buộc phải là exact-anchor object hoặc null nếu "
+        "cửa sổ thật sự kết thúc trước kickoff. Mỗi anchor phải là một chuỗi con "
+        "chép nguyên văn từ đúng evidence, "
         "kể cả dấu câu và chính tả ASR. Mỗi block phải liên tục, tập trung vào "
         "roster trực tiếp và có độ dài thô không quá "
         f"{max_coarse_duration_seconds:g} giây. Nếu block trước quá dài hoặc đi "
@@ -265,6 +267,7 @@ class QwenLineupDetector:
         max_coarse_duration_seconds: float = (
             DEFAULT_MAX_COARSE_LINEUP_DURATION_SECONDS
         ),
+        require_kickoff_field: bool = False,
     ) -> None:
         if not model.strip():
             raise LineupDetectionError("Qwen text model cannot be empty.")
@@ -292,6 +295,7 @@ class QwenLineupDetector:
         self.retry_delay_seconds = retry_delay_seconds
         self.expected_segment_count = expected_segment_count
         self.max_coarse_duration_seconds = max_coarse_duration_seconds
+        self.require_kickoff_field = require_kickoff_field
         self.client = (
             client
             if client is not None
@@ -339,6 +343,7 @@ class QwenLineupDetector:
         last_error: LineupDetectionError | None = None
         attempt_log: list[dict[str, object]] = []
         attempt_prompt = prompt
+        best_partial: LineupDetectionResult | None = None
         for attempt in range(1, self.max_attempts + 1):
             payload: dict[str, object] | None = None
             metrics: dict[str, object] = {}
@@ -357,21 +362,12 @@ class QwenLineupDetector:
                     max_segment_duration_seconds=(
                         self.max_coarse_duration_seconds
                     ),
+                    require_kickoff_field=self.require_kickoff_field,
                 )
                 count = len(result.segments)
                 rejected_candidates = result.raw_response.get(
                     "_rejected_candidates", []
                 )
-                if (
-                    rejected_candidates
-                    and self.expected_segment_count is not None
-                    and count < self.expected_segment_count
-                    and attempt < self.max_attempts
-                ):
-                    raise LineupDetectionError(
-                        "One or more Qwen lineup candidates were rejected as "
-                        "player-walkout/ceremony content."
-                    )
                 if count == 0:
                     status = "empty"
                 elif self.expected_segment_count is None:
@@ -394,6 +390,66 @@ class QwenLineupDetector:
                     status=status,
                 )
                 completed.validate()
+                needs_candidate_repair = (
+                    bool(rejected_candidates)
+                    and self.expected_segment_count is not None
+                    and count < self.expected_segment_count
+                    and attempt < self.max_attempts
+                )
+                if needs_candidate_repair:
+                    if (
+                        best_partial is None
+                        or count > len(best_partial.segments)
+                    ):
+                        best_partial = completed
+                    repair_error = LineupDetectionError(
+                        "One or more Qwen lineup candidates were rejected as "
+                        "ceremony or post-kickoff content."
+                    )
+                    attempt_log.append(
+                        {
+                            "attempt": attempt,
+                            "status": "accepted_partial",
+                            "error": str(repair_error),
+                            "payload": payload,
+                            **metrics,
+                        }
+                    )
+                    attempt_prompt = _repair_detection_prompt(
+                        prompt,
+                        error=repair_error,
+                        payload=payload,
+                        max_coarse_duration_seconds=(
+                            self.max_coarse_duration_seconds
+                        ),
+                    )
+                    print(
+                        "Qwen returned a valid partial lineup result; "
+                        f"requesting one repair ({attempt + 1}/"
+                        f"{self.max_attempts})."
+                    )
+                    continue
+                if (
+                    best_partial is not None
+                    and len(best_partial.segments) > count
+                ):
+                    best_raw = dict(best_partial.raw_response)
+                    best_raw["_validation_attempts"] = attempt_log + [
+                        {
+                            "attempt": attempt,
+                            "status": "accepted_but_less_complete",
+                            **metrics,
+                        }
+                    ]
+                    best_raw["_partial_response_fallback"] = (
+                        "later_qwen_response_was_less_complete"
+                    )
+                    fallback = replace(
+                        best_partial,
+                        raw_response=best_raw,
+                    )
+                    fallback.validate()
+                    return fallback
                 return completed
             except QwenLineupRequestError as exc:
                 last_error = exc
@@ -427,6 +483,18 @@ class QwenLineupDetector:
                     }
                 )
                 if attempt >= self.max_attempts:
+                    if best_partial is not None:
+                        best_raw = dict(best_partial.raw_response)
+                        best_raw["_validation_attempts"] = attempt_log
+                        best_raw["_partial_response_fallback"] = (
+                            "later_qwen_repairs_failed_validation"
+                        )
+                        fallback = replace(
+                            best_partial,
+                            raw_response=best_raw,
+                        )
+                        fallback.validate()
+                        return fallback
                     raise QwenLineupValidationError(
                         str(exc),
                         attempt_log,

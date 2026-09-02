@@ -58,6 +58,14 @@ có các diễn biến như chuyền bóng, sút, phạm lỗi, việt vị, ph�
 bóng hoặc gọi tên cầu thủ đang chạm bóng, mọi mô tả sơ đồ/wing-back/trung vệ ở
 phần sau đều là phân tích trong trận và tuyệt đối không được trả về.
 
+Trường `kickoff` là bắt buộc ở cấp cao nhất của JSON. Nếu transcript đã có thời
+điểm trận bắt đầu hoặc play-by-play đầu tiên, trả một object gồm
+`evidence_segment_id`, `anchor_text` nguyên văn 5-15 từ của diễn biến đầu tiên và
+`confidence`. Nếu toàn bộ cửa sổ kết thúc trước kickoff, trả `"kickoff": null`.
+Không được trả null nếu transcript đã mô tả cầu thủ chuyền/chạm bóng, đồng hồ trận
+đấu đang chạy, một pha bóng, quả phạt hoặc tình huống thi đấu. Hệ thống sẽ nội suy
+anchor này và loại bằng code mọi candidate nằm sau kickoff.
+
 Các cụm như “introducing the players one by one”, “next out”, “will follow”,
 “leads out”, “the players make their way out” là bằng chứng trực tiếp của nghi
 lễ. Mọi chuỗi đọc tên tiếp nối phần báo hiệu đó vẫn là walkout, kể cả khi nằm ở

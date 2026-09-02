@@ -208,6 +208,30 @@ def build_jobs(
     return jobs
 
 
+def load_detection_review(segments_csv: Path) -> tuple[bool, list[str]]:
+    """Read semantic review state persisted beside a detected lineup CSV."""
+    metadata_path = segments_csv.parent / "detection_metadata.json"
+    if not metadata_path.is_file():
+        return False, []
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        raise ClipExportError(
+            f"Cannot read lineup detection metadata: {metadata_path}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ClipExportError(
+            f"Lineup detection metadata must be an object: {metadata_path}"
+        )
+    raw_reasons = payload.get("review_reasons", [])
+    reasons = (
+        [str(reason) for reason in raw_reasons if str(reason).strip()]
+        if isinstance(raw_reasons, list)
+        else []
+    )
+    return bool(payload.get("requires_review")), reasons
+
+
 def find_ffmpeg(executable: str) -> str:
     executable_path = Path(executable).expanduser()
     if executable_path.parent != Path("."):
@@ -372,6 +396,8 @@ def write_export_manifest(
     segments_csv: Path,
     output_dir: Path,
     exported_jobs: list[ClipJob],
+    requires_review: bool = False,
+    review_reasons: list[str] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -379,7 +405,9 @@ def write_export_manifest(
         "segments_csv": str(segments_csv),
         "output_dir": str(output_dir),
         "exported_count": len(exported_jobs),
-        "status": "complete",
+        "status": "complete_requires_review" if requires_review else "complete",
+        "requires_review": requires_review,
+        "review_reasons": list(review_reasons or []),
         "exported": [
             {
                 "csv_row_number": job.csv_row_number,
@@ -405,10 +433,12 @@ def main() -> int:
     try:
         segments_csv = resolve_project_path(args.segments_csv)
         video_dir = resolve_project_path(args.video_dir)
+        requires_review, review_reasons = load_detection_review(segments_csv)
+        default_output_dir = default_lineup_clip_dir(segments_csv)
         output_dir = resolve_project_path(
             args.output_dir
             if args.output_dir is not None
-            else default_lineup_clip_dir(segments_csv)
+            else default_output_dir
         )
         manifest_path = resolve_project_path(
             args.manifest
@@ -440,6 +470,8 @@ def main() -> int:
             segments_csv=segments_csv,
             output_dir=output_dir,
             exported_jobs=exported_jobs,
+            requires_review=requires_review,
+            review_reasons=review_reasons,
         )
         print(f"Exported {len(jobs)} clip(s) to: {output_dir}")
         print(f"Export manifest: {manifest_path}")

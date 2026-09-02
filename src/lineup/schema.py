@@ -49,6 +49,28 @@ REQUIRED_LINEUP_FIELDS = (
 LINEUP_RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
+        "kickoff": {
+            "anyOf": [
+                {"type": "null"},
+                {
+                    "type": "object",
+                    "properties": {
+                        "evidence_segment_id": {"type": "string", "minLength": 1},
+                        "anchor_text": {"type": "string", "minLength": 1},
+                        "confidence": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1,
+                        },
+                    },
+                    "required": [
+                        "evidence_segment_id",
+                        "anchor_text",
+                        "confidence",
+                    ],
+                },
+            ]
+        },
         "lineup_segments": {
             "type": "array",
             "maxItems": 2,
@@ -59,7 +81,7 @@ LINEUP_RESPONSE_SCHEMA = {
             },
         },
     },
-    "required": ["lineup_segments"],
+    "required": ["kickoff", "lineup_segments"],
 }
 CSV_COLUMNS = (
     "video segment_id detection_status team_name start_seconds end_seconds confidence "
@@ -68,6 +90,7 @@ CSV_COLUMNS = (
 ).split()
 MAX_EVIDENCE_GAP_SECONDS = 30.0
 MAX_LINEUP_SEGMENTS = 2
+MAX_LINEUP_AFTER_KICKOFF_SECONDS = 3.0
 DETECTION_STATUSES = {"complete", "incomplete", "empty", "unconstrained"}
 
 
@@ -260,6 +283,120 @@ def _anchor_character_matches(
     return _anchor_token_matches(anchor, evidence_text)
 
 
+def _exact_anchor_time(
+    anchor: str,
+    evidence_ids: Iterable[str],
+    *,
+    evidence_bounds: Mapping[str, tuple[float, float]],
+    evidence_texts: Mapping[str, str],
+    use_end: bool,
+    error_label: str,
+) -> float:
+    """Resolve one exact transcript anchor to a coarse absolute timestamp."""
+    matches: list[tuple[str, int, int, int]] = []
+    for evidence_id in evidence_ids:
+        text = evidence_texts[evidence_id]
+        normalized_evidence = _normalized_text(text)
+        matches.extend(
+            (
+                evidence_id,
+                match_start,
+                match_end,
+                len(normalized_evidence),
+            )
+            for match_start, match_end in _anchor_character_matches(anchor, text)
+        )
+    if len(matches) != 1:
+        detail = "not found" if not matches else "ambiguous"
+        raise LineupDetectionError(f"{error_label} is {detail} in cited evidence.")
+
+    evidence_id, match_start, match_end, text_length = matches[0]
+    position = match_end if use_end else match_start
+    segment_start, segment_end = evidence_bounds[evidence_id]
+    fraction = position / max(1, text_length)
+    return segment_start + (segment_end - segment_start) * fraction
+
+
+def _parse_kickoff_seconds(
+    payload: Mapping[str, object],
+    *,
+    known_evidence: set[str],
+    evidence_bounds: Mapping[str, tuple[float, float]] | None,
+    evidence_texts: Mapping[str, str] | None,
+    window_start: float,
+    window_end: float,
+    require_kickoff_field: bool,
+) -> tuple[float | None, dict[str, object]]:
+    """Validate Qwen's global kickoff anchor before accepting lineup blocks."""
+    if "kickoff" not in payload:
+        if require_kickoff_field:
+            raise LineupDetectionError(
+                "Model response must contain kickoff (an exact anchor object or null)."
+            )
+        return None, {"status": "missing"}
+
+    raw_kickoff = payload.get("kickoff")
+    if raw_kickoff is None:
+        return None, {"status": "not_observed"}
+    if not isinstance(raw_kickoff, dict):
+        raise LineupDetectionError("kickoff must be an object or null.")
+
+    evidence_id = str(raw_kickoff.get("evidence_segment_id", "")).strip()
+    original_evidence_id = evidence_id
+    anchor = str(raw_kickoff.get("anchor_text", "")).strip()
+    try:
+        confidence = float(raw_kickoff["confidence"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise LineupDetectionError("kickoff has invalid confidence.") from exc
+    if not anchor:
+        raise LineupDetectionError("kickoff must contain an exact anchor_text.")
+    if not math.isfinite(confidence) or not 0 <= confidence <= 1:
+        raise LineupDetectionError("kickoff confidence must be between 0 and 1.")
+
+    if evidence_texts is not None and (
+        evidence_id not in known_evidence
+        or not _anchor_character_matches(anchor, evidence_texts[evidence_id])
+    ):
+        global_matches = [
+            candidate_id
+            for candidate_id, text in evidence_texts.items()
+            if candidate_id in known_evidence
+            and _anchor_character_matches(anchor, text)
+        ]
+        if len(global_matches) == 1:
+            evidence_id = global_matches[0]
+    if evidence_id not in known_evidence:
+        raise LineupDetectionError("kickoff has an invalid evidence segment ID.")
+    if evidence_bounds is None or evidence_texts is None:
+        return None, {
+            "status": "unresolved",
+            "evidence_segment_id": evidence_id,
+            "anchor_text": anchor,
+            "confidence": confidence,
+        }
+
+    kickoff_seconds = _exact_anchor_time(
+        anchor,
+        (evidence_id,),
+        evidence_bounds=evidence_bounds,
+        evidence_texts=evidence_texts,
+        use_end=False,
+        error_label="kickoff anchor_text",
+    )
+    if kickoff_seconds < window_start - 2 or kickoff_seconds > window_end + 2:
+        raise LineupDetectionError("kickoff timestamp is outside the processed window.")
+    validation = {
+        "status": "validated",
+        "evidence_segment_id": evidence_id,
+        "anchor_text": anchor,
+        "confidence": confidence,
+        "seconds": round(kickoff_seconds, 3),
+    }
+    if evidence_id != original_evidence_id:
+        validation["evidence_segment_id_repaired_from"] = original_evidence_id
+    return kickoff_seconds, validation
+
+
 def _parse_candidate(
     item: object,
     *,
@@ -270,6 +407,7 @@ def _parse_candidate(
     window_start: float,
     window_end: float,
     max_segment_duration_seconds: float | None,
+    kickoff_seconds: float | None,
 ) -> LineupSegment | None:
     if not isinstance(item, dict):
         raise LineupDetectionError(f"Candidate {index} must be an object.")
@@ -359,35 +497,18 @@ def _parse_candidate(
         evidence_start = min(bound[0] for bound in cited_bounds)
         evidence_end = max(bound[1] for bound in cited_bounds)
 
+
     def anchor_time(anchor: str, field: str, *, use_end: bool) -> float | None:
         if evidence_bounds is None or evidence_texts is None:
             return None
-        matches: list[tuple[str, int, int, int]] = []
-        for evidence_id in evidence:
-            text = evidence_texts[evidence_id]
-            normalized_evidence = _normalized_text(text)
-            matches.extend(
-                (
-                    evidence_id,
-                    match_start,
-                    match_end,
-                    len(normalized_evidence),
-                )
-                for match_start, match_end in _anchor_character_matches(
-                    anchor,
-                    text,
-                )
-            )
-        if len(matches) != 1:
-            detail = "not found" if not matches else "ambiguous"
-            raise LineupDetectionError(
-                f"Candidate {index} {field} is {detail} in cited evidence."
-            )
-        evidence_id, match_start, match_end, text_length = matches[0]
-        position = match_end if use_end else match_start
-        segment_start, segment_end = evidence_bounds[evidence_id]
-        fraction = position / max(1, text_length)
-        return segment_start + (segment_end - segment_start) * fraction
+        return _exact_anchor_time(
+            anchor,
+            evidence,
+            evidence_bounds=evidence_bounds,
+            evidence_texts=evidence_texts,
+            use_end=use_end,
+            error_label=f"Candidate {index} {field}",
+        )
 
     anchored_start = anchor_time(
         start_anchor, "start_anchor_text", use_end=False
@@ -413,6 +534,13 @@ def _parse_candidate(
         )
     if start < window_start - 2 or end > window_end + 2:
         raise LineupDetectionError(f"Candidate {index} is outside the window.")
+    if kickoff_seconds is not None and (
+        start >= kickoff_seconds
+        or end > kickoff_seconds + MAX_LINEUP_AFTER_KICKOFF_SECONDS
+    ):
+        raise RejectedLineupCandidate(
+            f"Candidate {index} occurs at or continues beyond the validated kickoff."
+        )
     if (
         max_segment_duration_seconds is not None
         and end - start > max_segment_duration_seconds
@@ -550,6 +678,7 @@ def parse_detection_result(
     window_start: float,
     window_end: float,
     max_segment_duration_seconds: float | None = None,
+    require_kickoff_field: bool = False,
 ) -> LineupDetectionResult:
     if (
         max_segment_duration_seconds is not None
@@ -568,6 +697,15 @@ def parse_detection_result(
             "Model response must contain a lineup_segments array."
         )
     evidence_ids = set(known_evidence)
+    kickoff_seconds, kickoff_validation = _parse_kickoff_seconds(
+        payload,
+        known_evidence=evidence_ids,
+        evidence_bounds=evidence_bounds,
+        evidence_texts=evidence_texts,
+        window_start=window_start,
+        window_end=window_end,
+        require_kickoff_field=require_kickoff_field,
+    )
     candidates: list[LineupSegment | None] = []
     rejected_candidates: list[dict[str, object]] = []
     for index, item in enumerate(payload["lineup_segments"], start=1):
@@ -584,6 +722,7 @@ def parse_detection_result(
                     max_segment_duration_seconds=(
                         max_segment_duration_seconds
                     ),
+                    kickoff_seconds=kickoff_seconds,
                 )
             )
         except RejectedLineupCandidate as exc:
@@ -607,6 +746,7 @@ def parse_detection_result(
         for index, segment in enumerate(parsed, start=1)
     )
     raw_response = dict(payload)
+    raw_response["_kickoff_validation"] = kickoff_validation
     if rejected_candidates:
         raw_response["_rejected_candidates"] = rejected_candidates
     result = LineupDetectionResult(model, segments, raw_response)

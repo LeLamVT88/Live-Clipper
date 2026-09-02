@@ -92,6 +92,13 @@ class TranscriptSchemaTests(unittest.TestCase):
         self.assertTrue(args.resume)
         self.assertIsNone(args.output_dir)
 
+    def test_cli_has_no_full_video_escape_hatch(self) -> None:
+        option_names = {
+            action.dest for action in build_transcription_parser()._actions
+        }
+
+        self.assertNotIn("full_video", option_names)
+
     def test_plans_fixed_chunks_covering_the_complete_requested_window(self) -> None:
         chunks = plan_audio_chunks(
             start_seconds=10.0,
@@ -158,6 +165,23 @@ class TranscriptSchemaTests(unittest.TestCase):
         )
 
         self.assertEqual(duration, 600.0)
+
+    def test_processing_never_crosses_the_absolute_600_second_limit(self) -> None:
+        media = MediaInfo(
+            duration_seconds=1_876.0,
+            audio_stream_count=1,
+            video_stream_count=1,
+        )
+
+        duration = fit_processing_duration(
+            media=media,
+            start_seconds=500.0,
+            requested_duration_seconds=600.0,
+            chunk_duration_seconds=60.0,
+            max_chunks=20,
+        )
+
+        self.assertEqual(duration, 100.0)
 
     def test_processing_rejects_input_without_audio(self) -> None:
         media = MediaInfo(

@@ -57,7 +57,7 @@ class OutputPathTests(unittest.TestCase):
                 ).resolve(),
             )
 
-    def test_video_outside_raw_data_uses_the_legacy_flat_fallback(self) -> None:
+    def test_video_outside_raw_data_uses_a_flat_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             output_root = root / "outputs"

@@ -49,6 +49,7 @@ from transcript.schema import (
 
 
 DEFAULT_DURATION_SECONDS = 600.0
+MAX_INPUT_SCAN_SECONDS = 600.0
 DEFAULT_CHUNK_DURATION_SECONDS = 60.0
 DEFAULT_MAX_CHUNKS = 10
 DEFAULT_WORKERS = 4
@@ -154,11 +155,12 @@ def fit_processing_duration(
         raise AudioExtractionError("Input has no audio stream to transcribe.")
     if max_chunks <= 0:
         raise AudioExtractionError("max_chunks must be positive.")
-    if start_seconds >= media.duration_seconds:
+    scan_end = min(media.duration_seconds, MAX_INPUT_SCAN_SECONDS)
+    if start_seconds >= scan_end:
         raise AudioExtractionError(
-            "Processing start is at or beyond the end of the input video."
+            "Processing start is at or beyond the first 600 seconds of the input."
         )
-    available = media.duration_seconds - start_seconds
+    available = scan_end - start_seconds
     chunk_budget = chunk_duration_seconds * max_chunks
     effective = min(requested_duration_seconds, available, chunk_budget)
     if not math.isfinite(effective) or effective <= 0:
@@ -310,9 +312,6 @@ def _transcribe_chunks(
     if existing and not args.overwrite and not args.resume:
         raise FileExistsError(f"Output already exists; pass --overwrite: {existing}")
 
-    legacy_audio = run_dir / "audio" / "transcription_input.wav"
-    if args.overwrite and legacy_audio.exists():
-        legacy_audio.unlink()
     print(
         f"Processing {video_path.name}: {start_seconds:.3f}-"
         f"{start_seconds + duration_seconds:.3f}s in {len(chunks)} chunk(s)"
@@ -407,6 +406,7 @@ def _write_run_outputs(
             "processed_end_seconds": start_seconds + processed_duration_seconds,
             "chunk_duration_seconds": chunk_duration_seconds,
             "max_chunks": max_chunks,
+            "input_scan_limit_seconds": MAX_INPUT_SCAN_SECONDS,
             "chunk_count": chunk_count,
             "workers": args.workers,
             "total_audio_duration_seconds": round(
