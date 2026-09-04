@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import re
 import unicodedata
@@ -138,25 +139,6 @@ def default_run_dir(
     return outputs / relative_video.parent / safe_stem(relative_video.stem)
 
 
-def default_lineup_prediction_dir(
-    transcript_path: PathLike,
-    *,
-    source_video: PathLike | None = None,
-) -> Path:
-    """Return the lineup prediction folder beside a standard transcript."""
-    transcript = resolve_project_path(transcript_path)
-    transcript_dir = transcript.parent
-    predictions_dir = transcript_dir.parent
-    if (
-        transcript_dir.name == "transcript"
-        and predictions_dir.name == "predictions"
-    ):
-        return predictions_dir / "lineup"
-    if source_video is not None and str(source_video).strip():
-        return default_run_dir(source_video) / "predictions" / "lineup"
-    return transcript.parent / "lineup"
-
-
 def default_lineup_clip_dir(segments_csv: PathLike) -> Path:
     """Return ``<run>/clips/lineup`` for a standard lineup prediction CSV."""
     segments_path = resolve_project_path(segments_csv)
@@ -165,6 +147,15 @@ def default_lineup_clip_dir(segments_csv: PathLike) -> Path:
     if lineup_dir.name == "lineup" and predictions_dir.name == "predictions":
         return predictions_dir.parent / "clips" / "lineup"
     return segments_path.parent / "clips"
+
+
+def write_json(payload: object, output_path: PathLike) -> None:
+    destination = resolve_project_path(output_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 def seconds_tag(value: float) -> str:

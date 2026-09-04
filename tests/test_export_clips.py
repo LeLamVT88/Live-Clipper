@@ -20,7 +20,7 @@ from lineup.export_clips import (
     parse_args,
     validate_jobs,
 )
-from transcript.audio import MediaInfo
+from lineup.media import MediaInfo
 
 
 class ClipExportValidationTests(unittest.TestCase):

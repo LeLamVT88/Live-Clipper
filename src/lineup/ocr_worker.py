@@ -1,7 +1,7 @@
-"""Tiny PaddleOCR worker used by visual_refinement.py.
+"""Tiny PaddleOCR worker used by the video-first visual scanner.
 
 This file intentionally has no imports from the main environment. It runs in
-``.venv-ocr`` so Qwen/PySceneDetect and Paddle dependencies stay isolated.
+``.venv-ocr`` so PySceneDetect and Paddle dependencies stay isolated.
 """
 
 from __future__ import annotations
@@ -26,9 +26,11 @@ MIN_RECOGNITION_SCORE = 0.55
 MIN_SHORTLIST_BOXES = 5
 MAX_SAVED_TEXTS = 20
 SHORTLIST_BUCKET_SECONDS = 6.0
-MAX_GRAPHIC_SECONDS = 60.0
-MAX_WEAK_BRIDGE_SECONDS = 4.0
+MAX_GRAPHIC_SECONDS = 120.0
+MAX_WEAK_BRIDGE_SECONDS = 6.0
 MAX_SHORT_SCENE_SECONDS = 18.0
+MAX_SCENE_FILL_SECONDS = 6.0
+MAX_RIGHT_CONTEXT_SECONDS = 3.0
 MAX_POSITIVE_GAP_SECONDS = 15.0
 LAYOUT_GRID_COLUMNS = 8
 LAYOUT_GRID_ROWS = 6
@@ -77,6 +79,12 @@ NON_LINEUP_TERMS = (
     "referee",
     "video assistant referee",
     "video match officials",
+    "goals from",
+    "goal from",
+    "attempts",
+    "appearances",
+    "yellow cards",
+    "red cards",
 )
 class OCRWorkerError(RuntimeError):
     pass
@@ -350,7 +358,10 @@ def _shortlist(
         (
             index
             for index, detection in detections.items()
-            if detection.box_count >= MIN_SHORTLIST_BOXES
+            if (
+                detection.box_count >= MIN_SHORTLIST_BOXES
+                or detection.lineup_layout
+            )
         ),
         key=lambda index: (-detections[index].density, center_rank[index]),
     )
@@ -567,7 +578,10 @@ def _context_indices(
         if index not in barriers
         and (
             _supports_lineup_context(detection, anchors)
-            or _matches_lineup_appearance(detection, anchors)
+            or (
+                detection.lineup_layout
+                and _matches_lineup_appearance(detection, anchors)
+            )
         )
     }
     supported.update(positives)
@@ -583,7 +597,7 @@ def _context_indices(
         by_scene.setdefault(unit.scene_index, []).append(unit.index)
     for indices in by_scene.values():
         duration = units[indices[-1]].end_seconds - units[indices[0]].start_seconds
-        if duration <= MAX_SHORT_SCENE_SECONDS and any(
+        if duration <= MAX_SCENE_FILL_SECONDS and any(
             index in supported for index in indices
         ):
             supported.update(index for index in indices if index not in barriers)
@@ -647,6 +661,93 @@ def _event_groups(
     return tuple(tuple(group) for group in groups)
 
 
+def _player_slide_seed_indices(
+    units: Sequence[Unit],
+    detections: dict[int, Detection],
+    recognitions: dict[int, Recognition],
+    barriers: set[int] | None = None,
+) -> set[int]:
+    """Promote a changing sequence of jersey/name cards to lineup evidence.
+
+    A player-by-player lineup often has too little text in any single frame to
+    satisfy the full-roster OCR gate.  Three nearby frames with a compatible
+    layout, jersey numbers, alphabetic labels, and changing OCR text are a
+    useful transcript-free signal while a static scoreboard is not.
+    """
+
+    def has_jersey_name(texts: Sequence[str]) -> bool:
+        for position, raw_text in enumerate(texts):
+            text = " ".join(raw_text.split())
+            number = NUMBER_PATTERN.search(text)
+            letters_after_number = (
+                sum(character.isalpha() for character in text[number.end() :])
+                if number
+                else 0
+            )
+            separator = text[number.end() : number.end() + 1] if number else ""
+            if (
+                number
+                and separator in {" ", ".", "-", "–"}
+                and letters_after_number >= 3
+            ):
+                return True
+            if (
+                number
+                and text[number.start() : number.end()] == text
+                and position + 1 < len(texts)
+                and sum(
+                    character.isalpha() for character in texts[position + 1]
+                )
+                >= 3
+            ):
+                return True
+        return False
+
+    blocked = barriers or set()
+    candidates: list[int] = []
+    for index, recognition in recognitions.items():
+        if index in blocked:
+            continue
+        detection = detections[index]
+        if (
+            detection.lineup_layout
+            and detection.box_count >= 3
+            and has_jersey_name(recognition.texts)
+        ):
+            candidates.append(index)
+
+    groups: list[list[int]] = []
+    for index in sorted(candidates):
+        if not groups:
+            groups.append([index])
+            continue
+        previous = groups[-1][-1]
+        gap = units[index].sample_seconds - units[previous].sample_seconds
+        compatible = (
+            _layout_similarity(detections[index], detections[previous]) >= 0.3
+            or _appearance_similarity(detections[index], detections[previous])
+            >= MIN_SCENE_APPEARANCE_SIMILARITY
+        )
+        if gap <= MAX_WEAK_BRIDGE_SECONDS and compatible:
+            groups[-1].append(index)
+        else:
+            groups.append([index])
+
+    promoted: set[int] = set()
+    for group in groups:
+        signatures = {
+            tuple(
+                " ".join(text.casefold().split())
+                for text in recognitions[index].texts
+                if text.strip()
+            )
+            for index in group
+        }
+        if len(group) >= 3 and len(signatures) >= 2:
+            promoted.update(group)
+    return promoted
+
+
 def _expand_event_indices(
     units: Sequence[Unit],
     detections: dict[int, Detection],
@@ -659,6 +760,13 @@ def _expand_event_indices(
     anchors = tuple(detections[index] for index in group)
     recognition_anchors = tuple(
         recognitions[index] for index in group if index in recognitions
+    )
+    right_context_seconds = min(
+        MAX_RIGHT_CONTEXT_SECONDS,
+        max(
+            0.5,
+            units[group[-1]].end_seconds - units[group[-1]].start_seconds,
+        ),
     )
     while left > 0:
         candidate = left - 1
@@ -714,6 +822,65 @@ def _expand_event_indices(
         ):
             break
         left = bridge
+    while right < len(units) - 1:
+        candidate = right + 1
+        if (
+            units[candidate].end_seconds - units[group[-1]].end_seconds
+            > right_context_seconds
+        ):
+            break
+        if units[candidate].scene_index != units[right].scene_index:
+            candidate_scene_index = units[candidate].scene_index
+            candidate_scene_units = tuple(
+                unit
+                for unit in units
+                if unit.scene_index == candidate_scene_index
+            )
+            scene_matches_identity = any(
+                unit.index in recognitions
+                and _shares_lineup_identity(
+                    recognitions[unit.index], recognition_anchors
+                )
+                for unit in candidate_scene_units
+            )
+            scene_matches_appearance = any(
+                _matches_lineup_appearance(detections[unit.index], anchors)
+                for unit in candidate_scene_units
+            )
+            has_appearance = bool(
+                detections[candidate].appearance_histogram
+                and any(anchor.appearance_histogram for anchor in anchors)
+            )
+            if has_appearance and not (
+                scene_matches_appearance or scene_matches_identity
+            ):
+                break
+            scene_duration = (
+                candidate_scene_units[-1].end_seconds
+                - candidate_scene_units[0].start_seconds
+            )
+            if (
+                scene_duration > MAX_SHORT_SCENE_SECONDS
+                and detections[candidate].area_ratio < 0.15
+                and candidate not in group
+                and not (scene_matches_appearance or scene_matches_identity)
+            ):
+                break
+        if not _path_is_continuous(
+            units, supported, left, candidate, barriers
+        ):
+            break
+        if candidate in supported:
+            right = candidate
+            continue
+        bridge = candidate
+        while bridge < len(units) and bridge not in supported:
+            bridge += 1
+        if bridge >= len(units) or not _path_is_continuous(
+            units, supported, left, bridge, barriers
+        ):
+            break
+        right = bridge
     return left, right
 
 
@@ -737,10 +904,18 @@ def _events(
             for term in NON_LINEUP_TERMS
         )
     }
-    seed_indices = tuple(
+    seed_indices = set(
         index
         for index, recognition in recognitions.items()
         if recognition.positive
+    )
+    seed_indices.update(
+        _player_slide_seed_indices(
+            units,
+            detections,
+            recognitions,
+            barriers,
+        )
     )
     for group in _event_groups(units, seed_indices, barriers):
         supported = _context_indices(
@@ -890,7 +1065,12 @@ def run(request: dict[str, object]) -> dict[str, object]:
             center = float(raw_task.get("center_seconds", 0.0))
             max_events = int(raw_task.get("max_events", 1))
             units = _load_units(raw_task)
-            order = _middle_out(units, center)
+            chronological = mode in {"global", "dense"}
+            order = (
+                tuple(unit.index for unit in units)
+                if chronological
+                else _middle_out(units, center)
+            )
             detections = _detect_frames(detector, reader, units, order)
             shortlist = _shortlist(
                 detections,
@@ -911,6 +1091,24 @@ def run(request: dict[str, object]) -> dict[str, object]:
                 if recognizer is not None and shortlist
                 else {}
             )
+            diagnostic_barriers = {
+                index
+                for index, recognition in recognitions.items()
+                if not recognition.positive
+                and any(
+                    term
+                    in " ".join(
+                        text.casefold() for text in recognition.texts
+                    )
+                    for term in NON_LINEUP_TERMS
+                )
+            }
+            player_slide_indices = _player_slide_seed_indices(
+                units,
+                detections,
+                recognitions,
+                diagnostic_barriers,
+            )
             total_recognized += len(shortlist)
             events = _events(
                 task_id,
@@ -919,7 +1117,7 @@ def run(request: dict[str, object]) -> dict[str, object]:
                 recognitions,
                 center_seconds=center,
                 max_events=max_events,
-                prefer_center=mode == "local",
+                prefer_center=mode in {"local", "dense"},
             )
             task_results.append(
                 {
@@ -927,7 +1125,9 @@ def run(request: dict[str, object]) -> dict[str, object]:
                     "mode": mode,
                     "unit_count": len(units),
                     "recognition_frame_count": len(shortlist),
-                    "scan_order": "middle_out",
+                    "scan_order": (
+                        "chronological" if chronological else "middle_out"
+                    ),
                     "selected_sample_seconds": [
                         round(units[index].sample_seconds, 3)
                         for index in shortlist
@@ -936,6 +1136,10 @@ def run(request: dict[str, object]) -> dict[str, object]:
                         round(units[index].sample_seconds, 3)
                         for index in shortlist
                         if recognitions[index].positive
+                    ],
+                    "player_slide_sample_seconds": [
+                        round(units[index].sample_seconds, 3)
+                        for index in sorted(player_slide_indices)
                     ],
                     "units": _unit_diagnostics(
                         units,

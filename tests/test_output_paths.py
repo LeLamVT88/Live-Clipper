@@ -13,7 +13,6 @@ if str(SRC_DIR) not in sys.path:
 
 from lineup.utils import (
     default_lineup_clip_dir,
-    default_lineup_prediction_dir,
     default_run_dir,
 )
 
@@ -76,25 +75,8 @@ class OutputPathTests(unittest.TestCase):
     def test_detection_and_export_stay_inside_the_same_run(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run_dir = Path(directory) / "outputs" / "ACLE" / "ACLE_01"
-            transcript = (
-                run_dir
-                / "predictions"
-                / "transcript"
-                / "transcript.jsonl"
-            )
             lineup_csv = (
-                default_lineup_prediction_dir(transcript)
-                / "lineup_segments.csv"
-            )
-
-            self.assertEqual(
-                lineup_csv,
-                (
-                    run_dir
-                    / "predictions"
-                    / "lineup"
-                    / "lineup_segments.csv"
-                ).resolve(),
+                run_dir / "predictions" / "lineup" / "lineup_segments.csv"
             )
             self.assertEqual(
                 default_lineup_clip_dir(lineup_csv),

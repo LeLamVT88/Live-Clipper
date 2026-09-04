@@ -17,7 +17,7 @@ if __package__ in (None, ""):
 
 import pandas as pd
 
-from transcript.audio import AudioExtractionError, probe_media
+from lineup.media import MediaProbeError, probe_media
 
 from lineup.utils import (
     PROJECT_ROOT,
@@ -283,7 +283,7 @@ def validate_jobs(
         if source not in durations:
             try:
                 info = probe_media(source, ffprobe=ffprobe)
-            except AudioExtractionError as exc:
+            except MediaProbeError as exc:
                 raise ClipExportError(str(exc)) from exc
             if not info.has_video:
                 raise ClipExportError(f"Source has no video stream: {source}")
@@ -370,7 +370,7 @@ def export_job(
             raise ClipExportError(f"FFmpeg failed for {job.source}: {detail}")
         try:
             output_info = probe_media(temporary_output, ffprobe=ffprobe)
-        except AudioExtractionError as exc:
+        except MediaProbeError as exc:
             raise ClipExportError(
                 f"Exported clip failed media validation: {exc}"
             ) from exc

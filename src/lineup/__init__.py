@@ -1,1 +1,1 @@
-"""Transcript-driven lineup detection and segment utilities."""
+"""Video-first football lineup detection and clip utilities."""

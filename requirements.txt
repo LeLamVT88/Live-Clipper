@@ -1,6 +1,4 @@
 pandas>=2.0.0
-dashscope>=1.25.11,<2
-python-dotenv>=1.1.0
 scenedetect>=0.6.5,<0.8
 
 # PaddleOCR runs in the Python 3.11 OCR environment. The main environment uses
