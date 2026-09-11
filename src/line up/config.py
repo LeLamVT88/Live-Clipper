@@ -23,6 +23,8 @@ class PipelineConfig:
     tier_medium_sec: float = 5.0       # 5-15s: 3 frames (25%, 50%, 75%)
     tier_short_sec: float = 2.0        # 2-5s: 1 frame (50%)
     micro_pool_target_sec: float = 3.0 # <2s: pooled until >= 3s, then 1 center sample
+    ultra_long_min_samples: int = 7
+    max_sample_gap_sec: float = 10.0
 
     # PP-OCRv6 Model Settings
     det_model: str = "PP-OCRv6_tiny_det"
@@ -53,3 +55,9 @@ class PipelineConfig:
     nms_iou_threshold: float = 0.20
     max_lineup_intervals: int = 2
     contiguous_lineup_merge_gap_sec: float = 10.0  # Merges back-to-back lineups (e.g. Bundesliga)
+
+    # CV only filters weak evidence; strong semantic lineups remain protected.
+    use_multimodal: bool = True
+    paired_frame_dt: float = 0.5
+    recovery_offset_sec: float = 1.5
+    max_recovery_anchors: int = 2

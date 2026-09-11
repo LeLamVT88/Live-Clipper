@@ -3,10 +3,30 @@ from __future__ import annotations
 import re
 from typing import Sequence
 
-from lineup_test.config import PipelineConfig
+from line_up.config import PipelineConfig
 
 # Clean clock / timer patterns (e.g. 0:07, 1:57, 14:25, 45+2, 90')
-CLOCK_PATTERN = re.compile(r"\b\d{1,2}:\d{2}(?:\+\d+)?\b|\b\d{1,2}\s*['’]\b")
+CLOCK_PATTERN = re.compile(r"(?<!\d)\d{1,2}:\d{2}(?:\+\d+)?(?!\d)|(?<!\d)\d{1,2}\s*['’](?!\d)")
+LINEUP_TITLE = re.compile(r"\bline[\s\-‐‑–—]*ups?\b", re.I)
+
+
+def non_lineup_reason(text: str, structured: bool) -> str:
+    """Reject explicit broadcast/table evidence, without blacklisting team names."""
+    if re.search(r"\b(?:var|avar)\b", text):
+        return "VAR / match officials"
+    channels = re.findall(r"\b(?:bein\s*sports\s*[1-9]|espn\s*\d|sky\s*sports\s*\w+)\b", text)
+    fixtures = re.search(r"\(\s*[0-9o]\s*\)\s*[-|vy]|\bv\s*\([0-9o]\)", text)
+    languages = set(re.findall(r"\b(?:english|french|spanish|german|arabic)\b", text))
+    if len(channels) >= 2 or fixtures or len(languages) >= 2:
+        return "Multi-view multiplex / split-screen"
+    if not structured:
+        tokens = set(re.findall(r"[a-z]+", text))
+        if {"pld", "pts"} <= tokens or re.search(r"(?:^|\s)[-–]\d+\b", text):
+            return "Standings / statistical table"
+        for term in ("knockout stage", "road to the final", "fixtures", "humidity", "weather", "stadium conditions", "pitch conditions"):
+            if term in text:
+                return term
+    return ""
 
 # Match scores (e.g. 2-0, 0.0, 0 - 0, 1:0)
 SCORE_PATTERN = re.compile(r"\b\d+\s*[-|:.–]\s*\d+\b")
@@ -26,6 +46,7 @@ LINEUP_KEYWORDS = (
     "line up",
     "starting xi",
     "starting eleven",
+    "starting 11",
     "substitutes",
     "formation",
     "coach",
@@ -163,10 +184,15 @@ def compute_lineup_score(
             "sample_numbers": [],
         }
 
-    full_text = " ".join(t.casefold() for t in clean_texts)
+    full_text = LINEUP_TITLE.sub("lineup", " ".join(t.casefold() for t in clean_texts))
+    has_formation = bool(FORMATION_PATTERN.search(full_text))
+    has_keyword = any(keyword in full_text for keyword in LINEUP_KEYWORDS)
+    content_reason = non_lineup_reason(full_text, has_formation or has_keyword)
 
     # 1. Negative term suppression (referees, aggregate score banners, match statistics)
     neg_hits = [term for term in NEGATIVE_TERMS if term in full_text]
+    if content_reason:
+        neg_hits.append(content_reason)
     if neg_hits:
         return 0.0, {
             "names": 0,
@@ -175,6 +201,7 @@ def compute_lineup_score(
             "keyword": False,
             "strong_evidence": False,
             "suppressed": True,
+            "content_barrier": True,
             "reason": f"Negative terms detected: {neg_hits}",
             "sample_names": [],
             "sample_numbers": [],

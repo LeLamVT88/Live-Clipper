@@ -2,17 +2,17 @@ from __future__ import annotations
 
 import functools
 from pathlib import Path
-from typing import Sequence
+from typing import TYPE_CHECKING, Sequence
 import cv2
 import numpy as np
-from paddleocr import PaddleOCR
+if TYPE_CHECKING:
+    from paddleocr import PaddleOCR
 
-from lineup_test.config import PipelineConfig
-
-
-@functools.lru_cache(maxsize=1)
+@functools.lru_cache(maxsize=2)
 def get_ocr_model(det_model: str = "PP-OCRv6_tiny_det", rec_model: str = "PP-OCRv6_tiny_rec") -> PaddleOCR:
-    """Load and cache PaddleOCR PP-OCRv6 Tiny inference models."""
+    """Load on demand; retain both the detector's Tiny and extractor's Small models."""
+    from paddleocr import PaddleOCR
+
     return PaddleOCR(
         text_detection_model_name=det_model,
         text_recognition_model_name=rec_model,
@@ -59,7 +59,12 @@ def run_ocr_batch(
         data = payload.get("res", payload)
         texts = data.get("rec_texts", [])
         scores = data.get("rec_scores", [])
-        boxes = data.get("dt_polys", [])
+        # Recognition may filter detections. Only these polygons align with rec_texts.
+        boxes = data.get("rec_polys")
+        if boxes is None:
+            boxes = data.get("dt_polys", [])
+        if not len(texts) == len(scores) == len(boxes):
+            raise ValueError("OCR text/confidence/polygon counts do not match")
         parsed.append((texts, scores, boxes))
 
     return parsed

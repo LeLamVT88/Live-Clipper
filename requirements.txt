@@ -1,8 +1,7 @@
-pandas>=2.0.0
+numpy>=1.26.0
 scenedetect>=0.6.5,<0.8
 
-# PaddleOCR runs in the Python 3.11 OCR environment. The main environment uses
-# Python 3.14, for which Paddle does not provide a compatible package.
+# The lineup pipeline requires Python 3.12 (see src/line up/__init__.py).
 paddlepaddle>=3.2.0,<4; python_version < "3.14"
 paddleocr>=3.3.0,<4; python_version < "3.14"
 opencv-python>=4.10.0,<5; python_version < "3.14"

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from lineup_test.config import PipelineConfig
+import math
+
+from line_up.config import PipelineConfig
 
 
 def get_scene_sample_timestamps(
@@ -50,12 +52,15 @@ def get_scene_sample_timestamps(
             samples.append(start + dur * 0.60)
             samples.append(start + dur * 0.80)
         else:
-            # Ultra-Long scenes (>= 35s): 5 frames at 10%, 30%, 50%, 70%, 90%
-            samples.append(start + dur * 0.10)
-            samples.append(start + dur * 0.30)
-            samples.append(start + dur * 0.50)
-            samples.append(start + dur * 0.70)
-            samples.append(start + dur * 0.90)
+            # Ultra-long scenes can contain several broadcast graphics even when
+            # PySceneDetect sees no hard boundary. Keep at least seven samples and
+            # add more when needed so a short lineup cannot fall between samples.
+            sample_count = max(
+                cfg.ultra_long_min_samples,
+                math.ceil(dur / cfg.max_sample_gap_sec) - 1,
+            )
+            step = dur / (sample_count + 1)
+            samples.extend(start + step * index for index in range(1, sample_count + 1))
 
     if short_pool and (short_pool[-1][1] - short_pool[0][0]) >= 1.5:
         samples.append((short_pool[0][0] + short_pool[-1][1]) / 2.0)

@@ -4,8 +4,8 @@ from typing import Sequence
 
 import numpy as np
 
-from lineup_test.config import PipelineConfig
-from lineup_test.schema import LineupInterval
+from line_up.config import PipelineConfig
+from line_up.schema import LineupInterval
 
 
 def propose_lineups(
@@ -15,6 +15,7 @@ def propose_lineups(
     config: PipelineConfig | None = None,
     *,
     strong_flags: Sequence[bool] | None = None,
+    content_barriers: Sequence[bool] | None = None,
 ) -> list[LineupInterval]:
     """Build persistent, structurally supported lineup intervals from OCR samples."""
     cfg = config or PipelineConfig()
@@ -22,6 +23,12 @@ def propose_lineups(
         return []
     if len(timestamps) != len(scores):
         raise ValueError("timestamps and scores must have the same length")
+    if content_barriers is not None and len(content_barriers) != len(scores):
+        raise ValueError("content_barriers and scores must have the same length")
+    barriers = [t for t, blocked in zip(timestamps, content_barriers or [False] * len(scores)) if blocked]
+
+    def blocked_between(start: float, end: float) -> bool:
+        return any(start <= t <= end for t in barriers)
     if strong_flags is None:
         evidence_flags = [score >= cfg.strong_score_threshold for score in scores]
     else:
@@ -61,7 +68,7 @@ def propose_lineups(
             in_same_scene(previous_time, current_time)
             or current_time - previous_time <= cfg.intra_scene_cluster_gap_sec
         )
-        if close_enough and not has_negative_barrier:
+        if close_enough and not has_negative_barrier and not blocked_between(previous_time, current_time):
             clusters[-1].append(index)
         else:
             clusters.append([index])
@@ -97,6 +104,14 @@ def propose_lineups(
             snap_s = max(0.0, c_start - 4.0)
             snap_e = c_end + 4.0
 
+        # Explicit non-lineup content is a boundary; ordinary low OCR during
+        # a team transition is not a reason to disable adjacent-team merging.
+        preceding = [t for t in barriers if snap_s <= t < c_start]
+        following = [t for t in barriers if c_end < t <= snap_e]
+        if preceding:
+            snap_s = max(preceding) + 0.01
+        if following:
+            snap_e = min(following) - 0.01
         duration = snap_e - snap_s
         # Temporal persistence verification: starting lineups must persist for at least min_duration
         if duration >= cfg.min_lineup_duration_sec:
@@ -120,7 +135,7 @@ def propose_lineups(
             merged_proposals.append(cand)
         else:
             prev = merged_proposals[-1]
-            if cand["start"] <= prev["end"] + cfg.inter_proposal_merge_gap_sec:
+            if cand["start"] <= prev["end"] + cfg.inter_proposal_merge_gap_sec and not blocked_between(prev["end"], cand["start"]):
                 prev["end"] = max(prev["end"], cand["end"])
                 prev["confidence"] = max(prev["confidence"], cand["confidence"])
                 prev["sample_count"] += cand["sample_count"]
@@ -157,7 +172,7 @@ def propose_lineups(
     # e.g. Bundesliga Freiburg vs Leipzig), merge them into 1 unified lineup output.
     if len(selected) == 2:
         gap = selected[1]["start"] - selected[0]["end"]
-        if 0.0 <= gap <= cfg.contiguous_lineup_merge_gap_sec:
+        if 0.0 <= gap <= cfg.contiguous_lineup_merge_gap_sec and not blocked_between(selected[0]["end"], selected[1]["start"]):
             merged_start = selected[0]["start"]
             merged_end = selected[1]["end"]
             merged_score = round((selected[0]["confidence"] + selected[1]["confidence"]) / 2.0, 4)

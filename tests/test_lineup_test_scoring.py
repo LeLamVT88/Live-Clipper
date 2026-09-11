@@ -10,8 +10,9 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from lineup_test.interval_proposer import propose_lineups
-from lineup_test.scorer import compute_lineup_score
+from line_up.interval_proposer import propose_lineups
+from line_up.sampler import get_scene_sample_timestamps
+from line_up.scorer import compute_lineup_score
 
 
 class LineupScoringTests(unittest.TestCase):
@@ -88,6 +89,21 @@ class LineupProposalTests(unittest.TestCase):
         self.assertEqual(result[0].start_seconds, 268.37)
         self.assertEqual(result[0].end_seconds, 327.58)
         self.assertTrue(result[0].metadata["merged_adjacent"])
+
+
+class SceneSamplingTests(unittest.TestCase):
+    def test_ultra_long_scene_uses_at_least_seven_samples(self) -> None:
+        samples = get_scene_sample_timestamps([(0.0, 35.0)], max_duration=35.0)
+
+        self.assertEqual(len(samples), 7)
+
+    def test_ultra_long_scene_caps_sample_gap_at_ten_seconds(self) -> None:
+        start, end = 432.67, 565.40
+        samples = get_scene_sample_timestamps([(start, end)], max_duration=end)
+        points = [start, *samples, end]
+
+        self.assertGreater(len(samples), 7)
+        self.assertLessEqual(max(b - a for a, b in zip(points, points[1:])), 10.01)
 
 
 if __name__ == "__main__":

@@ -41,6 +41,10 @@ class FrameSampleResult:
     strong_evidence: bool = False
     suppressed: bool = False
     suppress_reason: str = ""
+    content_barrier: bool = False
+    ocr_score: float = 0.0
+    stationarity: float | None = None
+    layout_score: float | None = None
 
 
 @dataclass(slots=True)

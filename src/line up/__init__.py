@@ -11,13 +11,13 @@ import sys
 # Strictly enforce Python 3.12+
 if sys.version_info < (3, 12) or sys.version_info >= (3, 13):
     raise RuntimeError(
-        f"lineup_test requires Python 3.12.x, but running on {sys.version}. "
+        f"line_up requires Python 3.12.x, but running on {sys.version}. "
         "Please run with 'uv run ...'."
     )
 
-from lineup_test.config import PipelineConfig
-from lineup_test.schema import LineupInterval, DetectionResult
-from lineup_test.pipeline import detect_lineups
+from line_up.config import PipelineConfig
+from line_up.schema import LineupInterval, DetectionResult
+from line_up.pipeline import detect_lineups
 
 __all__ = [
     "detect_lineups",

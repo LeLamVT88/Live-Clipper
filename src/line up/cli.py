@@ -5,8 +5,8 @@ import json
 import subprocess
 from pathlib import Path
 
-from lineup_test.config import PipelineConfig
-from lineup_test.pipeline import detect_lineups
+from line_up.config import PipelineConfig
+from line_up.pipeline import detect_lineups
 
 
 def export_video_clip(video_path: Path, start: float, end: float, output_path: Path) -> bool:
@@ -52,12 +52,26 @@ def main():
     parser.add_argument("--max-scan", type=float, default=600.0, help="Maximum seconds to scan from start of video (default: 600s)")
     parser.add_argument("--output-json", type=str, default=None, help="Path to write JSON detection results")
     parser.add_argument("--export-clips-dir", type=str, default=None, help="Directory to export cut lineup video clips")
+    parser.add_argument("--extract-starters", action="store_true", help="Select graphic windows and OCR starters after detection")
 
     args = parser.parse_args()
     cfg = PipelineConfig(max_scan_seconds=args.max_scan)
 
     print(f"Running lineup detection on: {args.video_path}")
     result = detect_lineups(args.video_path, config=cfg)
+    output = result.to_dict()
+    if args.extract_starters:
+        from mapping.pipeline import extract_lineup_graphics
+        output["graphic_extractions"] = [
+            extract_lineup_graphics(args.video_path, interval.start_seconds, interval.end_seconds)
+            for interval in result.lineups
+        ]
+        for extraction in output["graphic_extractions"]:
+            stats = extraction["stats"]
+            print(f"Graphic selection: {stats['status']} ({stats['total_seconds']:.2f}s including extraction)")
+            for graphic in extraction["graphics"]:
+                pairs = sum(p["confirmed"] for p in graphic["players"])
+                print(f"  {graphic['layout']}: {graphic['status']}, {pairs}/11 confirmed pairs")
 
     print("\n" + "=" * 60)
     print(f"DETECTION COMPLETE ({result.processing_time_seconds:.2f}s total)")
@@ -75,7 +89,7 @@ def main():
         out_json = Path(args.output_json)
         out_json.parent.mkdir(parents=True, exist_ok=True)
         with open(out_json, "w", encoding="utf-8") as f:
-            json.dump(result.to_dict(), f, indent=2, ensure_ascii=False)
+            json.dump(output, f, indent=2, ensure_ascii=False)
         print(f"\nJSON results saved to: {out_json}")
 
     if args.export_clips_dir and result.lineups:

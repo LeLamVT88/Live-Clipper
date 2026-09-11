@@ -4,7 +4,7 @@ from pathlib import Path
 from scenedetect import SceneManager, open_video
 from scenedetect.detectors import AdaptiveDetector, ContentDetector
 
-from lineup_test.config import PipelineConfig
+from line_up.config import PipelineConfig
 
 
 def detect_scenes(
