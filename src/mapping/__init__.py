@@ -1,5 +1,6 @@
-"""Extract starting-player names and shirt numbers from lineup graphics."""
+"""Starting-lineup extraction from short football graphic clips."""
 
-from mapping.pipeline import MappingConfig, extract_lineup_graphics
+from mapping.config import MappingConfig, load_config
+from mapping.pipeline import extract_lineup
 
-__all__ = ["MappingConfig", "extract_lineup_graphics"]
+__all__ = ["MappingConfig", "extract_lineup", "load_config"]

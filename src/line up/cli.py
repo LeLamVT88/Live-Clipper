@@ -52,7 +52,6 @@ def main():
     parser.add_argument("--max-scan", type=float, default=600.0, help="Maximum seconds to scan from start of video (default: 600s)")
     parser.add_argument("--output-json", type=str, default=None, help="Path to write JSON detection results")
     parser.add_argument("--export-clips-dir", type=str, default=None, help="Directory to export cut lineup video clips")
-    parser.add_argument("--extract-starters", action="store_true", help="Select graphic windows and OCR starters after detection")
 
     args = parser.parse_args()
     cfg = PipelineConfig(max_scan_seconds=args.max_scan)
@@ -60,19 +59,6 @@ def main():
     print(f"Running lineup detection on: {args.video_path}")
     result = detect_lineups(args.video_path, config=cfg)
     output = result.to_dict()
-    if args.extract_starters:
-        from mapping.pipeline import extract_lineup_graphics
-        output["graphic_extractions"] = [
-            extract_lineup_graphics(args.video_path, interval.start_seconds, interval.end_seconds)
-            for interval in result.lineups
-        ]
-        for extraction in output["graphic_extractions"]:
-            stats = extraction["stats"]
-            print(f"Graphic selection: {stats['status']} ({stats['total_seconds']:.2f}s including extraction)")
-            for graphic in extraction["graphics"]:
-                pairs = sum(p["confirmed"] for p in graphic["players"])
-                print(f"  {graphic['layout']}: {graphic['status']}, {pairs}/11 confirmed pairs")
-
     print("\n" + "=" * 60)
     print(f"DETECTION COMPLETE ({result.processing_time_seconds:.2f}s total)")
     print("=" * 60)

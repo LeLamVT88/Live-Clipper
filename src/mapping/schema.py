@@ -1,108 +1,109 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
-
-BBox = tuple[float, float, float, float]
-
-
-@dataclass(frozen=True, slots=True)
-class ExclusionRegion:
-    role: str
-    box: BBox
-    reason: str
+import numpy as np
 
 
 @dataclass(frozen=True, slots=True)
-class OCRToken:
-    index: int
-    text: str
-    confidence: float
-    box: BBox
+class Rect:
+    """A rectangle expressed as fractions of the full frame."""
 
-    @property
-    def center(self) -> tuple[float, float]:
-        return ((self.box[0] + self.box[2]) / 2, (self.box[1] + self.box[3]) / 2)
+    x: float
+    y: float
+    width: float
+    height: float
 
-    @property
-    def width(self) -> float:
-        return self.box[2] - self.box[0]
+    def __post_init__(self) -> None:
+        values = (self.x, self.y, self.width, self.height)
+        if any(not 0.0 <= value <= 1.0 for value in values):
+            raise ValueError(f"Crop percentages must be in [0, 1], got {values}")
+        if self.width <= 0 or self.height <= 0 or self.x + self.width > 1.0 or self.y + self.height > 1.0:
+            raise ValueError(f"Invalid crop rectangle: {values}")
 
-    @property
-    def height(self) -> float:
-        return self.box[3] - self.box[1]
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> Rect:
+        return cls(*(float(value[key]) for key in ("x_pct", "y_pct", "w_pct", "h_pct")))
 
-
-@dataclass(slots=True)
-class Panel:
-    role: str
-    box: BBox
-    name_tokens: list[OCRToken]
-    token_indexes: set[int] = field(default_factory=set)
+    def pixels(self, shape: tuple[int, ...]) -> tuple[int, int, int, int]:
+        height, width = shape[:2]
+        x0, y0 = round(self.x * width), round(self.y * height)
+        x1, y1 = round((self.x + self.width) * width), round((self.y + self.height) * height)
+        return x0, y0, x1, y1
 
 
 @dataclass(frozen=True, slots=True)
-class PlayerCard:
-    """One visual lineup slot with independent name and number regions."""
-
-    panel_role: str
-    name: str
-    card_box: BBox
-    name_box: BBox
-    number_box: BBox
-    name_confidence: float
-    jersey_number: int | None = None
-
-
-@dataclass(slots=True)
-class PlayerObservation:
+class FrameSample:
     timestamp: float
-    panel_role: str
-    name: str
-    name_confidence: float
-    name_box: BBox
-    jersey_number: int | None = None
-    number_confidence: float = 0.0
-    number_box: BBox | None = None
-    number_source: str = "unresolved"
-    pair_confidence: float = 0.0
-    number_candidates: list[int] = field(default_factory=list)
-    # Scores are local to one timestamp. OCR variants improve this score but do
-    # not become independent temporal votes.
-    number_candidate_scores: dict[int, float] = field(default_factory=dict)
+    image: np.ndarray
 
-    def to_evidence(self) -> dict[str, object]:
-        return {
-            "timestamp": round(self.timestamp, 3),
-            "panel_role": self.panel_role,
-            "name": self.name,
-            "name_confidence": round(self.name_confidence, 4),
-            "name_box": [round(v, 5) for v in self.name_box],
-            "jersey_number": self.jersey_number,
-            "number_candidates": self.number_candidates,
-            "number_candidate_scores": {
-                str(number): round(score, 4)
-                for number, score in sorted(self.number_candidate_scores.items())
-            },
-            "number_confidence": round(self.number_confidence, 4),
-            "number_box": None if self.number_box is None else [round(v, 5) for v in self.number_box],
-            "number_source": self.number_source,
-            "pair_confidence": round(self.pair_confidence, 4),
-        }
+
+@dataclass(frozen=True, slots=True)
+class StableSegment:
+    start_index: int
+    end_index: int
+    start_seconds: float
+    end_seconds: float
+    mean_diff: float
+
+
+@dataclass(frozen=True, slots=True)
+class TeamObservation:
+    timestamp: float
+    raw_text: str
+    team: str | None
+    similarity: float
 
 
 @dataclass(slots=True)
-class FrameAnalysis:
+class TeamBoundary:
+    from_team: str
+    to_team: str
+    left_seconds: float
+    right_seconds: float
     timestamp: float
-    panels: list[Panel]
-    observations: list[PlayerObservation]
-    sharpness: float
-    score: float
-    issues: list[str]
-    raw_ocr: dict[str, object]
-    cards: list[PlayerCard] = field(default_factory=list)
-    exclusions: list[ExclusionRegion] = field(default_factory=list)
 
-    @property
-    def starter_observations(self) -> list[PlayerObservation]:
-        return [o for o in self.observations if o.panel_role.startswith("starter_")]
+
+@dataclass(frozen=True, slots=True)
+class ClipSegment:
+    team: str
+    start_seconds: float
+    end_seconds: float
+    source_clip: Path
+
+
+@dataclass(frozen=True, slots=True)
+class PlayerUnit:
+    box: tuple[int, int, int, int]
+    shirt_box: tuple[int, int, int, int]
+    number_box: tuple[int, int, int, int]
+    name_box: tuple[int, int, int, int]
+    detection_score: float
+
+
+@dataclass(frozen=True, slots=True)
+class RawPlayer:
+    jersey_number: int | None
+    player_name: str
+    number_confidence: float
+    name_confidence: float
+
+
+@dataclass(frozen=True, slots=True)
+class SquadPlayer:
+    team: str
+    jersey_number: int
+    player_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class LineupRow:
+    team: str
+    jersey_number: int | None
+    player_name: str
+    role: str
+    source_clip: str
+    frame_timestamp_sec: float
+    ocr_confidence: str

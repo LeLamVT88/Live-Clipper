@@ -1,10 +1,13 @@
-"""Select lineup graphics and read starters from an existing clip."""
+"""Run the mapping package from the repository root."""
+
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
-from mapping.graphic_cli import main
+from mapping.cli import main
+
 
 if __name__ == "__main__":
     main()
+
