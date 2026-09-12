@@ -38,18 +38,31 @@ def main() -> None:
     parser.add_argument("--detection-json", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--scout-fps", type=float, default=2.0)
+    parser.add_argument("--fallback-scout-fps", type=float, default=5.0)
     args = parser.parse_args()
 
     jobs = _load_jobs(args)
-    config = MappingConfig(scout_fps=args.scout_fps)
+    config = MappingConfig(
+        scout_fps=args.scout_fps,
+        fallback_scout_fps=max(args.scout_fps, args.fallback_scout_fps),
+    )
     extractions = []
     for video, start, end in jobs:
         print(f"Mapping starters: {video} [{start:.3f}, {end:.3f}]", flush=True)
         extraction = extract_lineup_graphics(video, start, end, config)
         extractions.append(extraction)
         print(f"  {extraction['stats']['status']}: {len(extraction['graphics'])} stable graphic(s)", flush=True)
+        for graphic in extraction["graphics"]:
+            confirmed = sum(bool(player["confirmed"]) for player in graphic["players"])
+            issue_text = ", ".join(graphic["issues"]) or "none"
+            print(
+                f"    graphic {graphic['graphic_index']}: {graphic['status']} "
+                f"({confirmed}/11 confirmed; issues: {issue_text})",
+                flush=True,
+            )
     paths = export_results(extractions, args.output_dir)
     print(f"Resolved CSV: {paths['resolved']}")
+    print(f"Partial CSV: {paths['partial']}")
     print(f"Diagnostics: {paths['diagnostics']}")
     print(f"Evidence: {paths['evidence']}")
 

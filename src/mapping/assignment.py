@@ -3,7 +3,12 @@ from __future__ import annotations
 from functools import lru_cache
 
 from mapping.schema import OCRToken, Panel, PlayerObservation
-from mapping.text import parse_jersey_number, split_inline_player
+from mapping.text import clean_player_name, parse_jersey_number, parse_number_crop, split_inline_player
+
+
+def _spatial_number(token: OCRToken) -> int | None:
+    """Allow digit-like glyphs only after panel geometry identifies a number token."""
+    return parse_jersey_number(token.text) or parse_number_crop(token.text)
 
 
 def _inside(box: tuple[float, float, float, float], token: OCRToken, padding: float = .04) -> bool:
@@ -22,7 +27,7 @@ def _edge_score(role: str, name: OCRToken, number: OCRToken) -> float | None:
         return 1.5 - 8 * vertical - 2.5 * max(0.0, horizontal)
     horizontal = abs(dx - nx)
     vertical = name.box[1] - number.box[3]
-    if horizontal > max(.065, name.width * .7) or not -.025 <= vertical <= .22:
+    if horizontal > max(.065, name.width * .7) or not -.025 <= vertical <= .15:
         return None
     return 1.4 - 6 * horizontal - 2.4 * max(0.0, vertical)
 
@@ -64,7 +69,7 @@ def pair_panel(panel: Panel, tokens: list[OCRToken], timestamp: float) -> list[P
             inline[i] = (number, clean_name)
 
     number_tokens = [token for token in tokens if token.index not in panel.token_indexes
-                     and parse_jersey_number(token.text) is not None and _inside(panel.box, token)]
+                     and _spatial_number(token) is not None and _inside(panel.box, token)]
     # Keep the DP bounded when scoreboards or tables leak into a panel.
     number_tokens = sorted(number_tokens, key=lambda token: token.confidence, reverse=True)[:16]
     remaining_names = [token for i, token in enumerate(names) if i not in inline]
@@ -74,7 +79,7 @@ def pair_panel(panel: Panel, tokens: list[OCRToken], timestamp: float) -> list[P
 
     result = []
     for i, token in enumerate(names):
-        display_name = inline.get(i, (None, token.text))[1]
+        display_name = clean_player_name(inline.get(i, (None, token.text))[1])
         observation = PlayerObservation(
             timestamp=timestamp, panel_role=panel.role, name=display_name,
             name_confidence=token.confidence, name_box=token.box,
@@ -82,15 +87,18 @@ def pair_panel(panel: Panel, tokens: list[OCRToken], timestamp: float) -> list[P
         if i in inline:
             observation.jersey_number = inline[i][0]
             observation.number_candidates = [inline[i][0]]
+            observation.number_candidate_scores = {inline[i][0]: token.confidence}
             observation.number_confidence = token.confidence
             observation.number_box = token.box
             observation.number_source = "inline_ocr"
             observation.pair_confidence = token.confidence
         elif token.index in assigned_by_token:
             number_token = assigned_by_token[token.index]
-            number = parse_jersey_number(number_token.text)
+            number = _spatial_number(number_token)
             observation.jersey_number = number
             observation.number_candidates = [number] if number is not None else []
+            observation.number_candidate_scores = ({number: number_token.confidence}
+                                                   if number is not None else {})
             observation.number_confidence = number_token.confidence
             observation.number_box = number_token.box
             observation.number_source = "spatial_ocr"

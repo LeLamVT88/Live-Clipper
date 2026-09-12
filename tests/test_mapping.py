@@ -91,6 +91,24 @@ class PanelTests(unittest.TestCase):
         self.assertIn("auxiliary_list", roles)
         self.assertIn("starter_pitch", roles)
 
+    def test_numberless_team_metadata_is_not_a_pitch_panel(self) -> None:
+        records = []
+        labels = ["KOR", "AUT", "THA", "BURIRAM", "UNITED", "ITA", "MAS", "STAFF PERSON"]
+        for i, label in enumerate(labels):
+            records.append((label, box(430 + (i % 3) * 180, 150 + (i // 3) * 150, 130)))
+        result = infer(records)
+        self.assertNotIn("starter_pitch", {panel.role for panel in result.panels})
+
+    def test_list_geometry_recovers_double_one_glyph(self) -> None:
+        records = []
+        for i, name in enumerate(NAMES):
+            number = "ll" if i == 0 else str(i + 1)
+            records.extend([(number, box(35, 95 + i * 45, 25)),
+                            (name, box(75, 95 + i * 45, 150))])
+        result = infer(records)
+        alisson = next(player for player in result.starter_observations if player.name == "ALISSON")
+        self.assertEqual(alisson.jersey_number, 11)
+
 
 class ConsensusTests(unittest.TestCase):
     def frames(self) -> list[FrameAnalysis]:
@@ -138,29 +156,31 @@ class SelectionAndExportTests(unittest.TestCase):
         self.assertEqual(centered_candidates([11, 15, 19, 21], 2, 7), [11, 15, 19, 21])
 
     def test_resolved_csv_contains_only_complete_graphics(self) -> None:
-        player = {
-            "slot_index": 1, "shirt_number": 1, "name": "ALISSON", "confirmed": True,
-            "name_confidence": .99, "pair_confidence": .95, "evidence_timestamps": [1, 2],
-            "number_source": "spatial_ocr",
-        }
+        def player(slot: int) -> dict[str, object]:
+            return {
+                "slot_index": slot, "shirt_number": slot, "name": NAMES[slot - 1],
+                "confirmed": True, "name_confidence": .99, "pair_confidence": .95,
+                "evidence_timestamps": [1, 2], "number_source": "spatial_ocr",
+            }
+        players = [player(slot) for slot in range(1, 12)]
         base = {
             "video_path": "match.mp4",
             "graphics": [
                 {"graphic_index": 1, "start_seconds": 0, "end_seconds": 2,
                  "best_frame_timestamp": 1, "selected_frame_timestamps": [0, 1, 2],
                  "selection_tier": 3, "layout": "pitch", "status": "partial",
-                 "issues": ["unconfirmed_numbers"], "players": [player]},
+                 "issues": ["unconfirmed_numbers"], "players": [players[0]]},
                 {"graphic_index": 2, "start_seconds": 3, "end_seconds": 5,
                  "best_frame_timestamp": 4, "selected_frame_timestamps": [3, 4, 5],
                  "selection_tier": 3, "layout": "pitch", "status": "complete",
-                 "issues": [], "players": [player]},
+                 "issues": [], "players": players},
             ],
         }
         with tempfile.TemporaryDirectory() as directory:
             paths = export_results([base], directory)
             with paths["resolved"].open(encoding="utf-8") as handle:
                 rows = list(csv.DictReader(handle))
-            self.assertEqual(len(rows), 1)
+            self.assertEqual(len(rows), 11)
             self.assertEqual(rows[0]["graphic_index"], "2")
 
     def test_list_and_pitch_phases_for_same_team_are_consolidated(self) -> None:

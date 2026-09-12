@@ -7,6 +7,15 @@ from difflib import SequenceMatcher
 
 SUBSTITUTE_WORDS = ("SUBSTITUTE", "SUBSTITUTES", "SUBS", "BENCH", "RESERVES")
 COACH_WORDS = ("HEAD COACH", "COACH", "MANAGER", "ENTRAINEUR", "TREINER")
+COMMENTATOR_WORDS = (
+    "COMMENTATOR", "COMMENTATORS", "COMMENTARY", "CASTER", "CASTERS",
+    "BLV", "BINH LUAN VIEN",
+)
+CLUB_MARKERS = {"FC", "AFC", "CF", "SC", "LFC", "LOSC", "AS", "AC", "FK", "SK"}
+OVERLAY_WORDS = {
+    "TV", "LIVE", "DIRECT", "TRUC TIEP", "TRUC TIEP HD", "UEFA COM",
+    "OFFICIAL", "MATCH OFFICIAL", "COMMENTARY", "COMMENTATOR",
+}
 NON_PLAYER_WORDS = {
     "LINEUP", "LINE UPS", "STARTING XI", "FORMATION", "TEAM FORMATION",
     "TEAM", "LEAGUE", "ELITE", "CHAMPIONS",
@@ -53,6 +62,29 @@ def split_inline_player(value: str) -> tuple[int | None, str]:
     return (number if 1 <= number <= 99 else None), match.group(2).strip()
 
 
+def clean_player_name(value: str) -> str:
+    """Remove presentation-only role tags while preserving the displayed spelling."""
+    _, candidate = split_inline_player(value)
+    candidate = re.sub(r"\s*[\[(](?:GK|C|CAPTAIN)[\])]\s*$", "", candidate,
+                       flags=re.IGNORECASE).strip()
+    return re.sub(r"\s+", " ", candidate)
+
+
+def is_likely_metadata(value: str) -> bool:
+    """Reject generic club/broadcast labels without maintaining a team-name list."""
+    text = normalized_text(value)
+    words = text.split()
+    if not text:
+        return True
+    if text in OVERLAY_WORDS or any(marker in words for marker in CLUB_MARKERS):
+        return True
+    if re.search(r"\b(?:TV\d*|HD|COM|ORG|NET)\b", text):
+        return True
+    if any(fragment in text for fragment in ("TRUC TIEP", "TRY C TIEP", "UEFA COM")):
+        return True
+    return False
+
+
 def is_anchor(value: str, words: tuple[str, ...]) -> bool:
     text = normalized_text(value)
     return text in words
@@ -63,11 +95,11 @@ def is_formation(value: str) -> bool:
 
 
 def is_player_name(value: str) -> bool:
-    _, candidate = split_inline_player(value)
+    candidate = clean_player_name(value)
     text = normalized_text(candidate)
-    if not text or text in NON_PLAYER_WORDS or is_formation(candidate):
+    if not text or text in NON_PLAYER_WORDS or is_likely_metadata(candidate) or is_formation(candidate):
         return False
-    if any(word in text for word in SUBSTITUTE_WORDS + COACH_WORDS):
+    if any(word in text for word in SUBSTITUTE_WORDS + COACH_WORDS + COMMENTATOR_WORDS):
         return False
     if re.fullmatch(r"\d+", text) or re.search(r"\d{1,2}:\d{2}", candidate):
         return False

@@ -6,19 +6,13 @@ from statistics import median
 import cv2
 import numpy as np
 
+from mapping.cards import number_roi
 from mapping.schema import BBox, FrameAnalysis, PlayerObservation
-from mapping.text import parse_number_crop
+from mapping.text import normalized_text, parse_number_crop
 from ocr_engine import run_ocr_batch
 
 
-def _fallback_search_box(observation: PlayerObservation) -> BBox:
-    x0, y0, x1, y1 = observation.name_box
-    if observation.panel_role == "starter_list":
-        return max(0.0, x0 - .16), max(0.0, y0 - .018), max(0.0, x0 - .003), min(1.0, y1 + .018)
-    center = (x0 + x1) / 2
-    half_width = max(.032, min(.055, (x1 - x0) * .60))
-    return (max(0.0, center - half_width), max(0.0, y0 - .10),
-            min(1.0, center + half_width), max(0.0, y0 - .008))
+VARIANTS_PER_CROP = 6
 
 
 def _search_boxes(observation: PlayerObservation, anchors: list[PlayerObservation]) -> list[BBox]:
@@ -43,11 +37,11 @@ def _search_boxes(observation: PlayerObservation, anchors: list[PlayerObservatio
         name_y = (observation.name_box[1] + observation.name_box[3]) / 2
         center_x = name_x + median(relative_x)
         center_y = name_y + median(relative_y)
-        half_width = max(.018, min(.055, median(widths) * 1.8))
-        half_height = max(.022, min(.065, median(heights) * 1.4))
+        half_width = max(.018, min(.047, median(widths) * 1.55))
+        half_height = max(.022, min(.058, median(heights) * 1.3))
         boxes.append((max(0.0, center_x - half_width), max(0.0, center_y - half_height),
                       min(1.0, center_x + half_width), min(1.0, center_y + half_height)))
-    fallback = _fallback_search_box(observation)
+    fallback = number_roi(observation.name_box, observation.panel_role)
     if not boxes or max(abs(a - b) for a, b in zip(boxes[0], fallback)) > .015:
         boxes.append(fallback)
     return boxes
@@ -71,11 +65,16 @@ def _variants(patch: np.ndarray) -> list[np.ndarray]:
     gray = cv2.cvtColor(enlarged, cv2.COLOR_BGR2GRAY)
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
     _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    blue = enlarged[:, :, 0]
+    blue_clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8)).apply(blue)
+    _, blue_otsu = cv2.threshold(blue, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     return [
         enlarged,
         cv2.cvtColor(clahe, cv2.COLOR_GRAY2BGR),
         cv2.cvtColor(otsu, cv2.COLOR_GRAY2BGR),
         cv2.cvtColor(255 - otsu, cv2.COLOR_GRAY2BGR),
+        cv2.cvtColor(blue_clahe, cv2.COLOR_GRAY2BGR),
+        cv2.cvtColor(blue_otsu, cv2.COLOR_GRAY2BGR),
     ]
 
 
@@ -109,19 +108,47 @@ def recover_frame_numbers(frame: np.ndarray, analysis: FrameAnalysis, model: obj
     for observation, boxes, variants in pending:
         readings = []
         votes: Counter[int] = Counter()
+        weighted_votes: Counter[int] = Counter()
         for variant_index in range(len(variants)):
             texts, scores, _ = results[cursor]
             cursor += 1
-            values = sorted({number for text in texts if (number := parse_number_crop(text)) is not None})
-            readings.append({"crop": variant_index // 4, "variant": variant_index % 4, "texts": texts,
+            value_scores: dict[int, float] = {}
+            contains_name = any(sum(character.isalpha() for character in normalized_text(text)) >= 3
+                                for text in texts)
+            for text, score in zip(texts, scores):
+                number = parse_number_crop(text)
+                explicit_digits = normalized_text(text).isdigit()
+                # A letter-like glyph is allowed only in an isolated number crop.
+                # This prevents the L in RICCI/other nearby name text becoming 1.
+                if number is not None and (explicit_digits or (not contains_name and float(score) >= .55)):
+                    value_scores[number] = max(value_scores.get(number, 0.0), float(score))
+            values = sorted(value_scores)
+            readings.append({"crop": variant_index // VARIANTS_PER_CROP,
+                             "variant": variant_index % VARIANTS_PER_CROP, "texts": texts,
                              "confidences": [round(float(score), 4) for score in scores], "numbers": values})
             if len(values) == 1:
                 votes[values[0]] += 1
+                weighted_votes[values[0]] += value_scores[values[0]]
         candidates = sorted(votes)
         observation.number_candidates = sorted(set(observation.number_candidates) | set(candidates))
-        if len(candidates) == 1 and votes[candidates[0]] >= 2:
-            observation.jersey_number = candidates[0]
-            observation.number_confidence = votes[candidates[0]] / len(variants)
+        for candidate in candidates:
+            observation.number_candidate_scores[candidate] = max(
+                observation.number_candidate_scores.get(candidate, 0.0),
+                float(weighted_votes[candidate] + votes[candidate] * .25),
+            )
+        ranked = sorted(
+            ((votes[number], weighted_votes[number], number) for number in candidates),
+            reverse=True,
+        )
+        accepted = None
+        if ranked and ranked[0][0] >= 2:
+            runner_votes, runner_weight = (ranked[1][0], ranked[1][1]) if len(ranked) > 1 else (0, 0.0)
+            if (ranked[0][0] >= runner_votes + 1
+                    and ranked[0][1] >= max(.01, runner_weight) * 1.25):
+                accepted = ranked[0][2]
+        if accepted is not None:
+            observation.jersey_number = accepted
+            observation.number_confidence = min(1.0, weighted_votes[accepted] / max(2, votes[accepted]))
             observation.number_box = boxes[0]
             observation.number_source = "local_preprocessed_ocr"
             observation.pair_confidence = observation.number_confidence * .8
@@ -130,6 +157,34 @@ def recover_frame_numbers(frame: np.ndarray, analysis: FrameAnalysis, model: obj
             "search_box": [round(value, 5) for value in boxes[0]],
             "search_boxes": [[round(value, 5) for value in box] for box in boxes],
             "variant_readings": readings,
+            "candidate_votes": {str(number): votes[number] for number in candidates},
+            "candidate_scores": {
+                str(number): round(float(weighted_votes[number]), 4) for number in candidates
+            },
             "accepted_number": observation.jersey_number if observation.number_source == "local_preprocessed_ocr" else None,
         })
     return evidence
+
+
+def recover_unresolved_from_frames(
+    frames: list[tuple[float, np.ndarray]], players: list[dict[str, object]], model: object,
+) -> tuple[list[FrameAnalysis], list[dict[str, object]]]:
+    """OCR only missing number ROIs on nearby frames, without full-frame OCR."""
+    unresolved = [player for player in players if not player["number_confirmed"]]
+    analyses: list[FrameAnalysis] = []
+    evidence: list[dict[str, object]] = []
+    for timestamp, frame in frames:
+        observations: list[PlayerObservation] = []
+        for player in unresolved:
+            reference = max(player["observations"], key=lambda item: item["name_confidence"])
+            observations.append(PlayerObservation(
+                timestamp=timestamp,
+                panel_role=reference["panel_role"],
+                name=player["name"],
+                name_confidence=float(reference["name_confidence"]),
+                name_box=tuple(reference["name_box"]),
+            ))
+        analysis = FrameAnalysis(timestamp, [], observations, 0.0, 0.0, [], {})
+        evidence.extend(recover_frame_numbers(frame, analysis, model))
+        analyses.append(analysis)
+    return analyses, evidence
