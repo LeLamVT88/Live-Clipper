@@ -1,120 +1,117 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-import json
+import argparse
+from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import Any
 
-from mapping.schema import Rect
-
-
-@dataclass(frozen=True, slots=True)
-class OCRConfig:
-    backend: str = "paddleocr"
-    device: str = "cpu"
-    detection_model: str = "PP-OCRv6_small_det"
-    recognition_model: str = "PP-OCRv6_small_rec"
-    upscale_factor: float = 3.0
-    llm_api_url: str | None = None
-    llm_model: str | None = None
-    llm_api_key_env: str = "LINEUP_LLM_API_KEY"
-
-    def __post_init__(self) -> None:
-        if self.backend not in {"paddleocr", "llm_vision"}:
-            raise ValueError("ocr.backend must be 'paddleocr' or 'llm_vision'")
-        if self.upscale_factor < 1:
-            raise ValueError("ocr.upscale_factor must be >= 1")
+from .frames import PROJECT_ROOT, LineupOCRError, resolve_project_path
 
 
-@dataclass(frozen=True, slots=True)
-class PlayerDetectionConfig:
-    min_saturation: int = 65
-    min_value: int = 45
-    white_saturation_max: int = 45
-    white_value_min: int = 205
-    background_color_distance: float = 24.0
-    min_area_pct: float = 0.0008
-    max_area_pct: float = 0.045
-    min_aspect_ratio: float = 0.35
-    max_aspect_ratio: float = 2.2
-    edge_margin_pct: float = 0.008
-    morphology_kernel: int = 5
-    name_extension_ratio: float = 0.75
-    horizontal_extension_ratio: float = 0.8
-    row_tolerance_ratio: float = 0.55
+OCR_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "predictions" / "ocr"
+DEFAULTS = {
+    "clips_dir": PROJECT_ROOT / "outputs" / "clips",
+    "frames_dir": PROJECT_ROOT / "data" / "ocr_frames",
+    "selected_frames_dir": (PROJECT_ROOT / "data" / "ocr_selected_frames"),
+    "frames_csv": OCR_OUTPUT_DIR / "ocr_frames.csv",
+    "scout_output_csv": OCR_OUTPUT_DIR / "ocr_scout_detections.csv",
+    "selected_frames_csv": (OCR_OUTPUT_DIR / "ocr_selected_frames.csv"),
+    "selection_diagnostics_csv": (OCR_OUTPUT_DIR / "ocr_frame_selection_diagnostics.csv"),
+    "output_csv": OCR_OUTPUT_DIR / "ocr_raw_detections.csv",
+    "resolved_output_csv": OCR_OUTPUT_DIR / "resolved_lineups.csv",
+    "resolved_diagnostics_csv": (OCR_OUTPUT_DIR / "resolved_lineups_diagnostics.csv"),
+    "attempts_csv": OCR_OUTPUT_DIR / "pipeline_attempts.csv",
+    "cache_dir": PROJECT_ROOT / ".cache" / "paddlex",
+}
 
 
-@dataclass(frozen=True, slots=True)
-class MappingConfig:
-    team_name_bar: Rect
-    lineup_region: Rect
-    substitutes_region: Rect | None = None
-    coach_region: Rect | None = None
-    exclude_regions: tuple[Rect, ...] = ()
-    sample_interval_sec: float = 0.3
-    stable_diff_threshold: float = 2.8
-    stable_min_frames: int = 3
-    team_similarity_threshold: float = 72.0
-    team_debounce_frames: int = 2
-    boundary_precision_sec: float = 0.05
-    expected_starters: int = 11
-    squad_similarity_threshold: float = 72.0
-    write_split_clips: bool = True
-    ocr: OCRConfig = field(default_factory=OCRConfig)
-    player_detection: PlayerDetectionConfig = field(default_factory=PlayerDetectionConfig)
-
-    def __post_init__(self) -> None:
-        if self.sample_interval_sec <= 0 or self.stable_diff_threshold < 0:
-            raise ValueError("Invalid frame sampling/stability configuration")
-        if self.stable_min_frames < 2 or self.team_debounce_frames < 2:
-            raise ValueError("Stable/debounce frame counts must be >= 2")
-        if not 0 <= self.team_similarity_threshold <= 100 or not 0 <= self.squad_similarity_threshold <= 100:
-            raise ValueError("Similarity thresholds must be in [0, 100]")
-        if self.boundary_precision_sec <= 0 or self.expected_starters < 1:
-            raise ValueError("Invalid boundary precision or expected starter count")
-
+@dataclass(frozen=True)
+class PipelineConfig:
+    clips_dir: Path
+    frames_dir: Path
+    selected_frames_dir: Path
+    frames_csv: Path
+    scout_output_csv: Path
+    selected_frames_csv: Path
+    selection_diagnostics_csv: Path
+    output_csv: Path
+    resolved_output_csv: Path
+    resolved_diagnostics_csv: Path
+    attempts_csv: Path
+    cache_dir: Path
+    fps: float = 2.0
+    scout_fps: float = 0.5
+    jpeg_quality: int = 95
+    min_score: float = 0.80
+    ocr_batch_size: int = 8
+    initial_frame_count: int = 3
+    expanded_frame_count: int = 7
+    players_per_lineup: int = 11
+    min_number_count: int = 8
+    same_lineup_gap_seconds: float = 20.0
+    signature_threshold: float = 0.45
+    min_pair_confidence: float = 0.80
+    disable_local_ocr: bool = False
+    extract_only: bool = False
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> MappingConfig:
-        regions = data.get("regions", data)
-        pipeline = data.get("pipeline", {})
-        ocr_data = data.get("ocr", {})
-        detection_data = data.get("player_detection", {})
-
-        def optional_rect(name: str) -> Rect | None:
-            value = regions.get(name)
-            return Rect.from_dict(value) if value else None
-
-        return cls(
-            team_name_bar=Rect.from_dict(regions["team_name_bar"]),
-            lineup_region=Rect.from_dict(regions["lineup_region"]),
-            substitutes_region=optional_rect("substitutes_region"),
-            coach_region=optional_rect("coach_region"),
-            exclude_regions=tuple(Rect.from_dict(value) for value in regions.get("exclude_regions", [])),
-            sample_interval_sec=float(pipeline.get("sample_interval_sec", 0.3)),
-            stable_diff_threshold=float(pipeline.get("stable_diff_threshold", 2.8)),
-            stable_min_frames=int(pipeline.get("stable_min_frames", 3)),
-            team_similarity_threshold=float(pipeline.get("team_similarity_threshold", 72)),
-            team_debounce_frames=int(pipeline.get("team_debounce_frames", 2)),
-            boundary_precision_sec=float(pipeline.get("boundary_precision_sec", 0.05)),
-            expected_starters=int(pipeline.get("expected_starters", 11)),
-            squad_similarity_threshold=float(pipeline.get("squad_similarity_threshold", 72)),
-            write_split_clips=bool(pipeline.get("write_split_clips", True)),
-            ocr=OCRConfig(**ocr_data),
-            player_detection=PlayerDetectionConfig(**detection_data),
+    def from_namespace(cls, args: argparse.Namespace) -> PipelineConfig:
+        values = {field.name: getattr(args, field.name) for field in fields(cls)}
+        for name in DEFAULTS:
+            values[name] = resolve_project_path(values[name])
+        config = cls(**values)
+        config.validate()
+        return config
+    def validate(self) -> None:
+        checks = (
+            (self.fps > 0 and self.scout_fps > 0, "--fps and --scout-fps must be positive."),
+            (self.scout_fps <= self.fps, "--scout-fps cannot be greater than --fps."),
+            (1 <= self.jpeg_quality <= 100, "--jpeg-quality must be between 1 and 100."),
+            (0 <= self.min_score <= 1, "--min-score must be between 0 and 1."),
+            (self.ocr_batch_size > 0, "--ocr-batch-size must be positive."),
+            (self.initial_frame_count > 0, "--initial-frame-count must be positive."),
+            (self.expanded_frame_count > self.initial_frame_count,
+             "--expanded-frame-count must exceed --initial-frame-count."),
+            (self.players_per_lineup > 0 and self.min_number_count > 0,
+             "--players-per-lineup and --min-number-count must be positive."),
+            (self.same_lineup_gap_seconds >= 0, "--same-lineup-gap-seconds cannot be negative."),
+            (0 <= self.signature_threshold <= 1, "--signature-threshold must be between 0 and 1."),
+            (0 <= self.min_pair_confidence <= 1, "--min-pair-confidence must be between 0 and 1."),
         )
+        if message := next((message for valid, message in checks if not valid), None):
+            raise LineupOCRError(message)
 
 
-def load_config(path: str | Path | None = None) -> MappingConfig:
-    config_path = Path(path) if path else Path(__file__).with_name("layout_config.json")
-    text = config_path.read_text(encoding="utf-8")
-    if config_path.suffix.lower() in {".yaml", ".yml"}:
-        try:
-            import yaml
-        except ImportError as exc:
-            raise RuntimeError("YAML config requires PyYAML: pip install PyYAML") from exc
-        data = yaml.safe_load(text)
-    else:
-        data = json.loads(text)
-    if not isinstance(data, dict):
-        raise ValueError("Layout config must contain an object at the top level")
-    return MappingConfig.from_dict(data)
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Read lineup clips exported by the PySceneDetect + OCR detector, "
+            "then run adaptive OCR on 3 frames, 7 frames, or the complete "
+            "2 FPS clip when the quality gate fails."
+        )
+    )
+    for name in DEFAULTS:
+        parser.add_argument(f"--{name.replace('_', '-')}", type=Path, default=DEFAULTS[name])
+    numeric = {
+        "fps": (float, 2.0), "scout-fps": (float, 0.5), "jpeg-quality": (int, 95),
+        "min-score": (float, 0.80), "ocr-batch-size": (int, 8),
+        "initial-frame-count": (int, 3), "expanded-frame-count": (int, 7),
+        "players-per-lineup": (int, 11), "min-number-count": (int, 8),
+        "same-lineup-gap-seconds": (float, 20.0), "signature-threshold": (float, 0.45),
+        "min-pair-confidence": (float, 0.80),
+    }
+    for name, (value_type, default) in numeric.items():
+        parser.add_argument(f"--{name}", type=value_type, default=default)
+    parser.add_argument(
+        "--disable-local-ocr",
+        action="store_true",
+        help="Disable targeted OCR refinement inside the resolver.",
+    )
+    parser.add_argument(
+        "--extract-only",
+        action="store_true",
+        help="Extract the 2 FPS frame metadata and stop before OCR.",
+    )
+    return parser
+
+
+def parse_config() -> PipelineConfig:
+    return PipelineConfig.from_namespace(build_parser().parse_args())
