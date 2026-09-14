@@ -13,10 +13,15 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from mapping.pipeline import (
     AttemptOutcome,
+    lineups_expected_in_segment,
     reusable_attempt_data,
 )
 from mapping.config import DEFAULTS, PipelineConfig, build_parser
-from mapping.resolver.quality import QualityResult, evaluate_segment_quality
+from mapping.resolver.quality import (
+    QualityResult,
+    evaluate_segment_quality,
+    select_match_lineups,
+)
 from mapping.selector import SegmentSelection
 from mapping.pipeline import LineupWorkflow, WorkflowState
 import mapping.pipeline as workflow
@@ -31,6 +36,8 @@ def resolved_players() -> list[dict[str, object]]:
             "slot_index": index,
             "shirt_number": index,
             "player_name": f"PLAYER {chr(64 + index)}",
+            "number_source": "detector",
+            "number_evidence_frames": 2,
             "pair_confidence": 0.95,
         }
         for index in range(1, 12)
@@ -117,6 +124,83 @@ class QualityGateTests(unittest.TestCase):
         self.assertFalse(result.passed)
         self.assertIn("resolver status", result.message)
 
+    def test_rejects_single_frame_local_ocr_shirt_number(self) -> None:
+        records = resolved_players()
+        records[0]["number_source"] = "local_ocr"
+        records[0]["number_evidence_frames"] = 1
+
+        result = evaluate_segment_quality(
+            records,
+            {"status": "resolved"},
+            expected_players=11,
+            min_pair_confidence=0.80,
+        )
+
+        self.assertFalse(result.passed)
+        self.assertIn("fewer than 2 frames", result.message)
+
+    def test_accepts_single_frame_local_number_with_scout_confirmed_name(self) -> None:
+        records = resolved_players()
+        records[0].update(
+            {
+                "number_source": "local_ocr",
+                "number_evidence_frames": 1,
+                "name_source": "scout",
+                "full_name_evidence_frames": 3,
+            }
+        )
+
+        result = evaluate_segment_quality(
+            records,
+            {"status": "resolved"},
+            expected_players=11,
+            min_pair_confidence=0.80,
+        )
+
+        self.assertTrue(result.passed)
+
+    def test_single_clip_requires_both_lineups(self) -> None:
+        one_lineup = resolved_players()
+        second_lineup = [
+            dict(row, lineup_index=2, player_name=f"OPPONENT {index}")
+            for index, row in enumerate(one_lineup, start=1)
+        ]
+
+        incomplete = evaluate_segment_quality(
+            one_lineup, {"status": "resolved"}, 11, 0.80, expected_lineups=2
+        )
+        complete = evaluate_segment_quality(
+            one_lineup + second_lineup,
+            {"status": "resolved"}, 11, 0.80, expected_lineups=2,
+        )
+
+        self.assertFalse(incomplete.passed)
+        self.assertIn("1/2 expected lineups", incomplete.message)
+        self.assertTrue(complete.passed)
+
+    def test_match_gate_rejects_duplicate_team_from_two_clips(self) -> None:
+        first = resolved_players()
+        duplicate = [dict(row, video="duplicate.mp4") for row in first]
+
+        selected, quality = select_match_lineups(first + duplicate, 2, 11)
+
+        self.assertEqual(selected, [])
+        self.assertFalse(quality.passed)
+        self.assertIn("1/2 distinct", quality.message)
+
+    def test_match_gate_keeps_two_distinct_teams(self) -> None:
+        first = resolved_players()
+        second = [
+            dict(row, video="opponent.mp4", player_name=f"OPPONENT {index}")
+            for index, row in enumerate(first, start=1)
+        ]
+
+        selected, quality = select_match_lineups(first + second, 2, 11)
+
+        self.assertTrue(quality.passed)
+        self.assertEqual(len(selected), 22)
+        self.assertEqual({row["lineup_index"] for row in selected}, {1, 2})
+
 
 class PipelineConfigTests(unittest.TestCase):
     def test_parser_exposes_every_configured_path(self) -> None:
@@ -125,8 +209,17 @@ class PipelineConfigTests(unittest.TestCase):
         for name in DEFAULTS:
             self.assertTrue(hasattr(args, name), name)
 
+    def test_match_lineup_count_is_configurable(self) -> None:
+        args = build_parser().parse_args(["--lineups-per-match", "1"])
+
+        self.assertEqual(args.lineups_per_match, 1)
+
 
 class AdaptiveFallbackTests(unittest.TestCase):
+    def test_two_clips_keep_one_lineup_fast_path_per_segment(self) -> None:
+        self.assertEqual(lineups_expected_in_segment(1, 2), 2)
+        self.assertEqual(lineups_expected_in_segment(2, 2), 1)
+
     def test_reuses_prior_frames_and_only_ocr_new_expansion(self) -> None:
         previous_records = [frame(index) for index in range(1, 4)]
         target_records = [frame(index) for index in range(1, 8)]
@@ -261,8 +354,9 @@ class AdaptiveFallbackTests(unittest.TestCase):
             scout_detections: object,
             selected_frame_count: int,
             scout_fps: float,
+            expected_lineups: int,
         ) -> list[SegmentSelection]:
-            del frame_records, scout_detections, scout_fps
+            del frame_records, scout_detections, scout_fps, expected_lineups
             return [
                 SegmentSelection(
                     video=key[0],
@@ -352,6 +446,7 @@ class AdaptiveFallbackTests(unittest.TestCase):
             initial_frame_count=3,
             expanded_frame_count=7,
             players_per_lineup=11,
+            lineups_per_match=1,
             min_number_count=8,
             same_lineup_gap_seconds=20.0,
             signature_threshold=0.45,

@@ -6,7 +6,14 @@ from itertools import combinations
 import numpy as np
 import pandas as pd
 
-from .common import consensus_text, is_name_like, normalize_text, similarity
+from .common import (
+    consensus_text,
+    is_name_like,
+    normalize_text,
+    parse_inline_player,
+    similarity,
+)
+from .table import table_pair_observations
 
 
 NameCandidate = tuple[str, float, int]
@@ -39,7 +46,11 @@ def nearby_name_candidates(
             normalized = normalize_text(row["text"])
             if normalized == normalize_text(label_row["text"]):
                 continue
-            if not is_name_like(row["text"]) or normalized in other_labels:
+            if (
+                not is_name_like(row["text"])
+                or parse_inline_player(row["text"]) is not None
+                or normalized in other_labels
+            ):
                 continue
             dx = abs(float(row["center_x_norm"]) - float(label_row["center_x_norm"]))
             dy = abs(float(row["center_y_norm"]) - float(label_row["center_y_norm"]))
@@ -72,6 +83,7 @@ def multiline_name_candidates(
             if (
                 row["text_type"] != "shirt_number_candidate"
                 and is_name_like(row["text"])
+                and parse_inline_player(row["text"]) is None
                 and (
                     normalize_text(row["text"]) not in other_labels
                     or similarity(row["text"], formation_label) >= 0.82
@@ -146,3 +158,98 @@ def best_full_name(
     if len(normalize_text(full_name)) <= len(normalize_text(formation_label)):
         return formation_label, confidence, evidence
     return full_name, confidence, evidence
+
+
+def _is_name_reference(
+    current_name: str, candidate: str, *, shirt_linked: bool = False,
+) -> bool:
+    current = normalize_text(current_name)
+    reference = normalize_text(candidate)
+    if not current or not reference:
+        return False
+    if reference == current:
+        return True
+    if len(reference) <= len(current):
+        return False
+    current_tokens = current.split()
+    reference_tokens = reference.split()
+    added_tokens = reference_tokens[: max(0, len(reference_tokens) - len(current_tokens))]
+    if shirt_linked and any(len(token) > 1 for token in added_tokens):
+        return True
+    reference_last = reference_tokens[-1]
+    current_last = current_tokens[-1]
+    matches = (
+        similarity(current, reference) >= 0.82
+        or similarity(current, reference_last) >= 0.86
+        or similarity(current_last, reference_last) >= 0.90
+    )
+    if not matches:
+        return False
+    return not added_tokens or any(len(token) > 1 for token in added_tokens)
+
+
+def enrich_player_names(
+    records: list[dict[str, object]], reference_detections: pd.DataFrame,
+    minimum_evidence_frames: int = 2,
+) -> list[dict[str, object]]:
+    """Use sparse full-frame OCR only to expand names already resolved in a lineup."""
+    if not records or reference_detections.empty:
+        return records
+    references = reference_detections[
+        reference_detections.apply(
+            lambda row: row["text_type"] != "shirt_number_candidate"
+            and is_name_like(row["text"])
+            and parse_inline_player(row["text"]) is None,
+            axis=1,
+        )
+    ]
+    paired_references = table_pair_observations(reference_detections)
+    enriched: list[dict[str, object]] = []
+    for record in records:
+        current = str(record.get("player_name", "")).strip()
+        try:
+            shirt_number = int(record.get("shirt_number"))
+        except (TypeError, ValueError):
+            shirt_number = -1
+        number_linked = [
+            (
+                item.player_name,
+                (item.number_score * item.name_score) ** 0.5,
+                item.frame_index,
+            )
+            for item in paired_references
+            if item.shirt_number == shirt_number
+        ]
+        text_linked = [
+            (str(row["text"]).strip(), float(row["score"]), int(row["frame_index"]))
+            for _, row in references.iterrows()
+            if _is_name_reference(current, str(row["text"]))
+        ]
+        supported: tuple[str, float, int] | None = None
+        for candidates in (number_linked, text_linked):
+            if not candidates:
+                continue
+            candidate = consensus_text(candidates, fuzzy_threshold=0.87)
+            is_supported_name = candidates is text_linked or _is_name_reference(
+                current, candidate[0], shirt_linked=True
+            )
+            if candidate[2] >= minimum_evidence_frames and is_supported_name:
+                supported = candidate
+                break
+        if supported is not None:
+            name, confidence, evidence = supported
+            updated = dict(record)
+            updated["player_name"] = name.strip().upper()
+            updated["name_source"] = "scout"
+            updated["name_confidence"] = round(confidence, 6)
+            updated["full_name_evidence_frames"] = evidence
+            number_confidence = float(updated.get("number_confidence", 0.0))
+            label_confidence = float(updated.get("label_confidence", 0.0))
+            updated["pair_confidence"] = round(
+                (number_confidence * label_confidence * max(confidence, 0.01)) ** (1 / 3),
+                6,
+            )
+            enriched.append(updated)
+            continue
+        enriched.append(record)
+    return enriched

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 import numpy as np
 import pandas as pd
@@ -18,6 +18,7 @@ from .common import (
     spatial_distance,
 )
 from .layout import FORMATION_LABEL_MAX_GAP, FORMATION_LABEL_MIN_GAP
+from .local_models import NUMBER_SOURCE_COLUMN
 from .player_names import best_full_name
 
 
@@ -130,7 +131,7 @@ def nearby_formation_labels(
     return labels
 
 
-def cluster_number_consensus(cluster: NumberCluster) -> tuple[int, float, int]:
+def cluster_number_consensus(cluster: NumberCluster) -> tuple[int, float, int, str]:
     by_number: defaultdict[int, list[pd.Series]] = defaultdict(list)
     for row in cluster.observations:
         by_number[int(str(row["text"]))].append(row)
@@ -142,9 +143,13 @@ def cluster_number_consensus(cluster: NumberCluster) -> tuple[int, float, int]:
         ),
     )
     rows = by_number[best_number]
-    return best_number, float(np.mean([float(row["score"]) for row in rows])), len(
-        {int(row["frame_index"]) for row in rows}
-    )
+    evidence = len({int(row["frame_index"]) for row in rows})
+    sources = {
+        str(row.get(NUMBER_SOURCE_COLUMN, "detector"))
+        for row in rows
+    }
+    source = "local_ocr" if sources == {"local_ocr"} else "detector"
+    return best_number, float(np.mean([float(row["score"]) for row in rows])), evidence, source
 
 
 def select_player_clusters(
@@ -183,9 +188,7 @@ def formation_rows(clusters: list[NumberCluster]) -> dict[int, int]:
 
 
 def validate_unique_shirt_numbers(records: list[dict[str, object]], lineup_index: int) -> None:
-    counts: defaultdict[int, int] = defaultdict(int)
-    for record in records:
-        counts[int(record["shirt_number"])] += 1
+    counts = Counter(int(record["shirt_number"]) for record in records)
     duplicates = sorted(number for number, count in counts.items() if count > 1)
     if duplicates:
         duplicate_text = ", ".join(str(number) for number in duplicates)
@@ -223,7 +226,12 @@ def resolve_event(
     normalized_labels = {normalize_text(label_results[id(cluster)][0]) for cluster in selected}
     records: list[dict[str, object]] = []
     for slot_index, cluster in enumerate(selected, start=1):
-        shirt_number, number_confidence, number_evidence = cluster_number_consensus(cluster)
+        (
+            shirt_number,
+            number_confidence,
+            number_evidence,
+            number_source,
+        ) = cluster_number_consensus(cluster)
         formation_label, label_confidence, label_evidence = label_results[id(cluster)]
         other_labels = normalized_labels - {normalize_text(formation_label)}
         player_name, name_confidence, name_evidence = best_full_name(
@@ -241,6 +249,7 @@ def resolve_event(
                 "formation_timestamp_seconds": event.start_seconds, "slot_index": slot_index,
                 "row_index": row_indices[id(cluster)], "shirt_number": shirt_number,
                 "formation_label": formation_label, "player_name": player_name,
+                "number_source": number_source,
                 "number_confidence": round(number_confidence, 6), "label_confidence": round(label_confidence, 6),
                 "name_confidence": round(name_confidence, 6), "pair_confidence": round(pair_confidence, 6),
                 "number_evidence_frames": number_evidence, "label_evidence_frames": label_evidence,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from pathlib import Path
 
 import cv2
@@ -70,21 +71,13 @@ def materialize_selected_frames(
 
 
 def selection_diagnostic_rows(selections: list[SegmentSelection]) -> list[dict[str, object]]:
-    return [
-        {
-            "video": selection.video, "segment_index": selection.segment_index,
-            "layout": selection.layout, "status": selection.status,
-            "score": round(selection.score, 3), "scout_frame_index": selection.scout_frame_index,
-            "scout_timestamp_seconds": selection.scout_timestamp_seconds,
-            "formation_anchor_count": selection.formation_anchor_count,
-            "table_pair_count": selection.table_pair_count,
-            "number_count": selection.number_count, "name_count": selection.name_count,
-            "crop_side": selection.crop_side, "crop_x1_norm": selection.crop_x1_norm,
-            "crop_x2_norm": selection.crop_x2_norm,
-            "selected_frame_indices": "|".join(
-                str(index) for index in selection.selected_frame_indices
-            ),
-            "message": selection.message,
-        }
-        for selection in selections
-    ]
+    rows: list[dict[str, object]] = []
+    for selection in selections:
+        row = asdict(selection)
+        row.update(
+            score=round(selection.score, 3),
+            crop_side=selection.crop_side,
+            selected_frame_indices="|".join(map(str, selection.selected_frame_indices)),
+        )
+        rows.append(row)
+    return rows

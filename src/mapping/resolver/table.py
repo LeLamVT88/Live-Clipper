@@ -104,7 +104,6 @@ def select_table_pairs(
     )
     selected: list[list[PairObservation]] = []
     used_numbers: set[int] = set()
-    used_names: list[str] = []
     for repeated in (True, False):
         for group in ranked:
             representative = group[0]
@@ -118,26 +117,64 @@ def select_table_pairs(
             )
             if not repeated and confidence < 0.90:
                 continue
-            normalized_name = normalize_text(representative.player_name)
+            center_y = float(np.median([item.center_y for item in group]))
             duplicate = representative.shirt_number in used_numbers or any(
-                similarity(normalized_name, existing) >= 0.84 for existing in used_names
+                similarity(representative.player_name, chosen[0].player_name) >= 0.84
+                and abs(center_y - float(np.median([item.center_y for item in chosen]))) <= 0.02
+                for chosen in selected
             )
             if duplicate:
                 continue
             selected.append(group)
             used_numbers.add(representative.shirt_number)
-            used_names.append(normalized_name)
             if len(selected) == expected_players:
                 return selected
     return selected
 
 
-def resolve_table_layout(
-    segment: pd.DataFrame, expected_players: int, lineup_index: int = 1,
-) -> tuple[list[dict[str, object]], int]:
-    selected = select_table_pairs(table_pair_observations(segment), expected_players)
-    if len(selected) < expected_players:
-        return [], len(selected)
+def split_table_events(
+    observations: list[PairObservation], max_gap_seconds: float,
+    signature_threshold: float,
+) -> list[list[PairObservation]]:
+    """Group repeated table rows into consecutive team presentations."""
+    frames: dict[int, list[PairObservation]] = {}
+    for observation in observations:
+        frames.setdefault(observation.frame_index, []).append(observation)
+    ordered = sorted(frames.values(), key=lambda rows: rows[0].timestamp_seconds)
+    events: list[list[PairObservation]] = []
+    for frame in ordered:
+        if not events:
+            events.append(frame.copy())
+            continue
+        previous_index = events[-1][-1].frame_index
+        previous = [row for row in events[-1] if row.frame_index == previous_index]
+        used: set[int] = set()
+        matches = 0
+        for row in frame:
+            match = next(
+                (
+                    index for index, other in enumerate(previous)
+                    if index not in used
+                    and row.shirt_number == other.shirt_number
+                    and similarity(row.player_name, other.player_name) >= 0.72
+                ),
+                None,
+            )
+            if match is not None:
+                used.add(match)
+                matches += 1
+        similarity_score = matches / max(1, min(len(frame), len(previous)))
+        gap = frame[0].timestamp_seconds - previous[0].timestamp_seconds
+        if gap <= max_gap_seconds and similarity_score >= signature_threshold:
+            events[-1].extend(frame)
+        else:
+            events.append(frame.copy())
+    return events
+
+
+def _table_records(
+    segment: pd.DataFrame, selected: list[list[PairObservation]], lineup_index: int,
+) -> list[dict[str, object]]:
     selected.sort(
         key=lambda group: float(np.median([observation.center_y for observation in group]))
     )
@@ -175,7 +212,27 @@ def resolve_table_layout(
                 "slot_center_y_norm": round(float(np.median([item.center_y for item in group])), 6),
             }
         )
-    return records, len(selected)
+    return records
+
+
+def resolve_table_events(
+    segment: pd.DataFrame, expected_players: int, max_gap_seconds: float,
+    signature_threshold: float,
+) -> tuple[list[dict[str, object]], int]:
+    """Resolve every complete table/list event in a clip."""
+    events = split_table_events(
+        table_pair_observations(segment), max_gap_seconds, signature_threshold
+    )
+    records: list[dict[str, object]] = []
+    best_count = 0
+    for event in events:
+        selected = select_table_pairs(event, expected_players)
+        best_count = max(best_count, len(selected))
+        if len(selected) != expected_players:
+            continue
+        lineup_index = len(records) // expected_players + 1
+        records.extend(_table_records(segment, selected, lineup_index))
+    return records, best_count
 
 
 def table_rows_for_frame(

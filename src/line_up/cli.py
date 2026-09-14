@@ -18,7 +18,18 @@ from mapping.selector import LineupFrameSelectionError
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-PLAYER_COLUMNS = ("lineup_clip", "shirt_number", "player_name")
+DATA_ROOT = PROJECT_ROOT / "data"
+OUTPUT_ROOT = PROJECT_ROOT / "outputs"
+MAPPING_CSV_FIELDS = (
+    "frames_csv",
+    "scout_output_csv",
+    "selected_frames_csv",
+    "selection_diagnostics_csv",
+    "output_csv",
+    "resolved_output_csv",
+    "resolved_diagnostics_csv",
+    "attempts_csv",
+)
 
 
 def export_video_clip(video_path: Path, start: float, end: float, output_path: Path) -> bool:
@@ -58,6 +69,15 @@ def export_video_clip(video_path: Path, start: float, end: float, output_path: P
             return False
 
 
+def default_output_dir(video_path: Path) -> Path:
+    resolved = video_path.expanduser().resolve()
+    try:
+        relative = resolved.relative_to(DATA_ROOT).with_suffix("")
+    except ValueError:
+        return OUTPUT_ROOT / safe_stem(resolved.stem)
+    return OUTPUT_ROOT.joinpath(*(safe_stem(part) for part in relative.parts))
+
+
 def mapping_config(clips_dir: Path, output_dir: Path, disable_local_ocr: bool) -> MappingConfig:
     artifacts = output_dir / "mapping"
     config = MappingConfig(
@@ -79,7 +99,15 @@ def mapping_config(clips_dir: Path, output_dir: Path, disable_local_ocr: bool) -
     return config
 
 
-def write_players_csv(resolved_csv: Path | None, output_csv: Path) -> int:
+def _json_shirt_number(value: str) -> int | str:
+    normalized = value.strip()
+    try:
+        return int(normalized)
+    except ValueError:
+        return normalized
+
+
+def write_players_json(resolved_csv: Path | None, output_json: Path) -> int:
     rows: list[dict[str, object]] = []
     if resolved_csv is not None and resolved_csv.is_file():
         with resolved_csv.open(newline="", encoding="utf-8-sig") as source:
@@ -87,31 +115,40 @@ def write_players_csv(resolved_csv: Path | None, output_csv: Path) -> int:
                 rows.append(
                     {
                         "lineup_clip": Path(row.get("video", "")).name,
-                        "shirt_number": row.get("shirt_number", ""),
+                        "lineup_index": int(row.get("lineup_index") or 1),
+                        "shirt_number": _json_shirt_number(row.get("shirt_number", "")),
                         "player_name": row.get("player_name", ""),
                     }
                 )
-    output_csv.parent.mkdir(parents=True, exist_ok=True)
-    with output_csv.open("w", newline="", encoding="utf-8") as destination:
-        writer = csv.DictWriter(destination, fieldnames=PLAYER_COLUMNS)
-        writer.writeheader()
-        writer.writerows(rows)
+    output_json.parent.mkdir(parents=True, exist_ok=True)
+    with output_json.open("w", encoding="utf-8") as destination:
+        json.dump(rows, destination, indent=2, ensure_ascii=False)
+        destination.write("\n")
     return len(rows)
 
 
+def remove_intermediate_csvs(config: MappingConfig) -> None:
+    for field_name in MAPPING_CSV_FIELDS:
+        getattr(config, field_name).unlink(missing_ok=True)
+
+
+def remove_legacy_players_csv(output_dir: Path) -> None:
+    (output_dir / "players.csv").unlink(missing_ok=True)
+
+
 def run_full_pipeline(
-    video_path: Path, output_dir: Path, max_scan: float = 600.0,
-    disable_local_ocr: bool = False,
+    video_path: Path, output_dir: Path, max_scan: float | None = None,
+    disable_local_ocr: bool = False, keep_diagnostics: bool = False,
 ) -> int:
     video_path = video_path.expanduser().resolve()
     if not video_path.is_file():
         raise FileNotFoundError(f"Input video does not exist: {video_path}")
-    if max_scan <= 0:
+    if max_scan is not None and max_scan <= 0:
         raise ValueError("--max-scan must be positive.")
     output_dir = output_dir.expanduser().resolve()
     clips_dir = output_dir / "clips"
     detection_json = output_dir / "detection_result.json"
-    players_csv = output_dir / "players.csv"
+    players_json = output_dir / "players.json"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Running lineup detection on: {video_path}")
@@ -132,7 +169,8 @@ def run_full_pipeline(
     with detection_json.open("w", encoding="utf-8") as destination:
         json.dump(output, destination, indent=2, ensure_ascii=False)
     if not result.lineups:
-        write_players_csv(None, players_csv)
+        write_players_json(None, players_json)
+        remove_legacy_players_csv(output_dir)
         print(f"No lineup interval found. Detection details: {detection_json}")
         return 2
 
@@ -155,12 +193,16 @@ def run_full_pipeline(
         config = mapping_config(mapping_input, output_dir, disable_local_ocr)
         mapping_status = LineupWorkflow(config).run()
 
-    player_count = write_players_csv(config.resolved_output_csv, players_csv)
+    player_count = write_players_json(config.resolved_output_csv, players_json)
+    remove_legacy_players_csv(output_dir)
+    if not keep_diagnostics:
+        remove_intermediate_csvs(config)
     print("\n" + "=" * 60)
     print(f"FULL PIPELINE COMPLETE: {player_count} player row(s)")
     print(f"Lineup clips : {clips_dir}")
-    print(f"Players CSV  : {players_csv}")
-    print(f"Detailed CSV : {config.resolved_output_csv}")
+    print(f"Players JSON : {players_json}")
+    if keep_diagnostics:
+        print(f"Detailed CSV : {config.resolved_output_csv}")
     print(f"Detection JSON: {detection_json}")
     return mapping_status
 
@@ -169,31 +211,36 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Detect lineup graphics in one football match, export the lineup clips, "
-            "then write player names and shirt numbers to CSV."
+            "then write player names and shirt numbers to JSON."
         )
     )
     parser.add_argument("video_path", type=Path, help="Input football match video")
     parser.add_argument(
         "--output-dir", type=Path,
-        help="Output directory (default: outputs/<video-name>)",
+        help="Output directory (default for data/<league>/<match>: outputs/<league>/<match>)",
     )
     parser.add_argument(
-        "--max-scan", type=float, default=600.0,
-        help="Maximum seconds scanned from the start of the match (default: 600)",
+        "--max-scan", type=float,
+        help="Optionally limit scanning to the first N seconds (default: full video)",
     )
     parser.add_argument(
         "--disable-local-ocr", action="store_true",
         help="Disable targeted OCR refinement in the player mapper.",
+    )
+    parser.add_argument(
+        "--keep-diagnostics", action="store_true",
+        help="Keep intermediate mapping CSV reports for debugging.",
     )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    output_dir = args.output_dir or PROJECT_ROOT / "outputs" / safe_stem(args.video_path.stem)
+    output_dir = args.output_dir or default_output_dir(args.video_path)
     try:
         return run_full_pipeline(
-            args.video_path, output_dir, args.max_scan, args.disable_local_ocr
+            args.video_path, output_dir, args.max_scan, args.disable_local_ocr,
+            args.keep_diagnostics,
         )
     except (
         FileNotFoundError,

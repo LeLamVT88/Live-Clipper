@@ -4,11 +4,32 @@ import numpy as np
 import pandas as pd
 
 from .common import (detections_without_substitute_panel, is_table_name_like,
-                     parse_inline_player, shirt_number_rows)
+                     normalize_text, parse_inline_player, shirt_number_rows)
 
 
 FORMATION_LABEL_MIN_GAP = 0.018
 FORMATION_LABEL_MAX_GAP = 0.13
+
+
+def is_large_heading_prefix(row: pd.Series, frame: pd.DataFrame) -> bool:
+    """Detect logo text repeated as the prefix of a much larger team heading."""
+    required = {"x1", "x2", "y1", "y2"}
+    if not required.issubset(frame.columns):
+        return False
+    label = normalize_text(row["text"])
+    if not label:
+        return False
+    width = max(1.0, float(row["x2"]) - float(row["x1"]))
+    height = max(1.0, float(row["y2"]) - float(row["y1"]))
+    for _, other in frame.iterrows():
+        heading = normalize_text(other["text"])
+        if heading == label or not heading.startswith(f"{label} "):
+            continue
+        heading_width = float(other["x2"]) - float(other["x1"])
+        heading_height = float(other["y2"]) - float(other["y1"])
+        if heading_width >= 2 * width and heading_height >= 1.8 * height:
+            return True
+    return False
 
 
 def formation_anchor_pairs(frame: pd.DataFrame) -> list[tuple[pd.Series, pd.Series]]:
@@ -70,6 +91,7 @@ def formation_name_rows(
             row["text_type"] == "shirt_number_candidate"
             or not is_table_name_like(row["text"])
             or parse_inline_player(row["text"]) is not None
+            or is_large_heading_prefix(row, frame)
         ):
             continue
         y = float(row["center_y_norm"])

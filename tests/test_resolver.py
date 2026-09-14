@@ -147,6 +147,34 @@ class SubstitutePanelMaskTests(unittest.TestCase):
 
         self.assertEqual(filtered["text"].tolist(), ["9", "STRIKER"])
 
+    def test_starter_list_is_not_mixed_into_formation_before_substitutes(self) -> None:
+        rows = [
+            detection(
+                frame_index=1, timestamp_seconds=2.0,
+                text=f"{number} RESERVE {number}", text_type="text",
+                x=0.15, y=0.2 + number * 0.04,
+            )
+            for number in range(1, 5)
+        ]
+        rows.extend([
+            detection(frame_index=1, timestamp_seconds=2.0, text="9",
+                      text_type="shirt_number_candidate", x=0.70, y=0.30),
+            detection(frame_index=1, timestamp_seconds=2.0, text="STRIKER",
+                      text_type="text", x=0.70, y=0.36),
+            detection(frame_index=2, timestamp_seconds=8.0, text="SUBSTITUTES",
+                      text_type="text", x=0.15, y=0.12),
+            detection(frame_index=2, timestamp_seconds=8.0, text="18 RESERVE",
+                      text_type="text", x=0.15, y=0.25),
+            detection(frame_index=2, timestamp_seconds=8.0, text="9",
+                      text_type="shirt_number_candidate", x=0.70, y=0.30),
+            detection(frame_index=2, timestamp_seconds=8.0, text="STRIKER",
+                      text_type="text", x=0.70, y=0.36),
+        ])
+
+        filtered = resolver.detections_without_substitute_panel(pd.DataFrame(rows))
+
+        self.assertEqual(filtered["text"].tolist(), ["9", "STRIKER", "9", "STRIKER"])
+
 
 class FormationResolutionTests(unittest.TestCase):
     def test_tightly_spaced_number_keeps_its_formation_label(self) -> None:
@@ -188,6 +216,220 @@ class FormationResolutionTests(unittest.TestCase):
         self.assertFalse(resolver.is_name_like("TEAM"))
         self.assertFalse(resolver.is_name_like("TEAM FORMATION"))
 
+    def test_large_team_heading_prefix_is_not_a_formation_name(self) -> None:
+        rows = [
+            detection(
+                frame_index=1,
+                timestamp_seconds=1.0,
+                text="9",
+                text_type="shirt_number_candidate",
+                x=0.65,
+                y=0.40,
+            ),
+            detection(
+                frame_index=1,
+                timestamp_seconds=1.0,
+                text="OSAKO",
+                text_type="text",
+                x=0.65,
+                y=0.46,
+            ),
+            detection(
+                frame_index=1,
+                timestamp_seconds=1.0,
+                text="VISSEL KOBE",
+                text_type="text",
+                x=0.25,
+                y=0.30,
+            ),
+            detection(
+                frame_index=1,
+                timestamp_seconds=1.0,
+                text="VISSEL",
+                text_type="text",
+                x=0.25,
+                y=0.60,
+            ),
+        ]
+        for row, box in zip(
+            rows,
+            ((620, 680, 380, 420), (600, 700, 440, 480),
+             (150, 550, 250, 350), (220, 320, 590, 630)),
+            strict=True,
+        ):
+            row["x1"], row["x2"], row["y1"], row["y2"] = box
+        frame = pd.DataFrame(rows)
+
+        names = resolver.formation_name_rows(
+            frame,
+            resolver.formation_anchor_pairs(frame),
+        )
+
+        self.assertNotIn("VISSEL", [str(row["text"]) for row in names])
+
+    def test_scout_references_expand_and_repair_resolved_names(self) -> None:
+        records = [
+            {
+                "player_name": "CYAMAKAWA",
+                "number_confidence": 0.95,
+                "label_confidence": 0.96,
+                "name_confidence": 0.97,
+                "pair_confidence": 0.96,
+                "full_name_evidence_frames": 3,
+            },
+            {
+                "player_name": "VISSEL",
+                "number_confidence": 0.95,
+                "label_confidence": 0.96,
+                "name_confidence": 0.97,
+                "pair_confidence": 0.96,
+                "full_name_evidence_frames": 3,
+            },
+            {
+                "player_name": "DEMBÉLÉ",
+                "number_confidence": 0.95,
+                "label_confidence": 0.96,
+                "name_confidence": 0.97,
+                "pair_confidence": 0.96,
+                "full_name_evidence_frames": 3,
+            },
+        ]
+        references = pd.DataFrame(
+            [
+                detection(
+                    frame_index=frame_index,
+                    timestamp_seconds=float(frame_index),
+                    text=text,
+                    text_type="text",
+                    x=0.55,
+                    y=0.35,
+                )
+                for frame_index in (1, 2)
+                for text in ("TETSUSHI YAMAKAWA", "VISSEL KOBE", "O. DEMBELE")
+            ]
+        )
+
+        enriched = resolver.enrich_player_names(records, references)
+
+        self.assertEqual(enriched[0]["player_name"], "TETSUSHI YAMAKAWA")
+        self.assertEqual(enriched[1]["player_name"], "VISSEL")
+        self.assertEqual(enriched[2]["player_name"], "DEMBÉLÉ")
+
+    def test_scout_number_pairs_expand_a_different_short_label(self) -> None:
+        records = [
+            {
+                "shirt_number": 25,
+                "player_name": "KUWA",
+                "number_confidence": 0.99,
+                "label_confidence": 0.99,
+                "name_confidence": 0.99,
+                "pair_confidence": 0.99,
+                "name_source": "resolver",
+            }
+        ]
+        references = pd.DataFrame(
+            [
+                detection(
+                    frame_index=frame_index,
+                    timestamp_seconds=float(frame_index),
+                    text="25 YUYA KAWASAKI",
+                    text_type="text",
+                    x=0.20,
+                    y=0.40,
+                )
+                for frame_index in (1, 2, 3)
+            ]
+        )
+
+        enriched = resolver.enrich_player_names(records, references)
+
+        self.assertEqual(enriched[0]["player_name"], "YUYA KAWASAKI")
+        self.assertEqual(enriched[0]["name_source"], "scout")
+
+    def test_scout_number_pair_does_not_replace_name_with_ocr_typo(self) -> None:
+        records = [
+            {
+                "shirt_number": 22,
+                "player_name": "GÜNDOGAN",
+                "number_confidence": 0.99,
+                "label_confidence": 0.99,
+                "name_confidence": 0.99,
+                "pair_confidence": 0.99,
+                "name_source": "resolver",
+            }
+        ]
+        references = pd.DataFrame(
+            [
+                detection(
+                    frame_index=frame_index,
+                    timestamp_seconds=float(frame_index),
+                    text="22 GÜNDOČAN",
+                    text_type="text",
+                    x=0.20,
+                    y=0.40,
+                )
+                for frame_index in (1, 2, 3)
+            ]
+        )
+
+        enriched = resolver.enrich_player_names(records, references)
+
+        self.assertEqual(enriched[0]["player_name"], "GÜNDOGAN")
+        self.assertEqual(enriched[0]["name_source"], "resolver")
+
+    def test_scout_name_normalizes_unicode_letter_case(self) -> None:
+        records = [
+            {
+                "shirt_number": 22,
+                "player_name": "GÜNDOGAN",
+                "number_confidence": 0.99,
+                "label_confidence": 0.99,
+                "name_confidence": 0.99,
+                "pair_confidence": 0.99,
+                "name_source": "resolver",
+            }
+        ]
+        references = pd.DataFrame(
+            [
+                detection(
+                    frame_index=frame_index,
+                    timestamp_seconds=float(frame_index),
+                    text="GÜNDOğAN",
+                    text_type="text",
+                    x=0.20,
+                    y=0.40,
+                )
+                for frame_index in (1, 2)
+            ]
+        )
+
+        enriched = resolver.enrich_player_names(records, references)
+
+        self.assertEqual(enriched[0]["player_name"], "GÜNDOĞAN")
+
+    def test_repeated_exact_scout_name_is_recorded_as_confirmation(self) -> None:
+        records = [{
+            "shirt_number": 7,
+            "player_name": "BURKE",
+            "number_confidence": 0.91,
+            "label_confidence": 0.99,
+            "name_confidence": 0.99,
+            "pair_confidence": 0.96,
+            "name_source": "resolver",
+        }]
+        references = pd.DataFrame([
+            detection(
+                frame_index=frame_index, timestamp_seconds=float(frame_index),
+                text="BURKE", text_type="text", x=0.60, y=0.40,
+            )
+            for frame_index in (1, 2, 3)
+        ])
+
+        enriched = resolver.enrich_player_names(records, references)
+
+        self.assertEqual(enriched[0]["name_source"], "scout")
+        self.assertEqual(enriched[0]["full_name_evidence_frames"], 3)
+
     def test_interface_title_is_not_appended_to_player_name(self) -> None:
         detections = pd.DataFrame(
             [
@@ -225,6 +467,24 @@ class FormationResolutionTests(unittest.TestCase):
         )
 
         self.assertEqual(player_name, "MINKI")
+
+    def test_inline_list_and_coach_are_not_appended_to_formation_name(self) -> None:
+        detections = pd.DataFrame([
+            detection(frame_index=1, timestamp_seconds=1.0, text="SHAQIRI",
+                      text_type="text", x=0.70, y=0.60),
+            detection(frame_index=1, timestamp_seconds=1.0, text="23 SHAQIRI",
+                      text_type="text", x=0.15, y=0.50),
+            detection(frame_index=1, timestamp_seconds=1.0, text="COACH",
+                      text_type="text", x=0.15, y=0.56),
+            detection(frame_index=1, timestamp_seconds=1.0, text="MURAT YAKIN",
+                      text_type="text", x=0.15, y=0.62),
+        ])
+
+        player_name, _, _ = resolver.best_full_name(
+            "SHAQIRI", detections, other_formation_labels=set()
+        )
+
+        self.assertEqual(player_name, "SHAQIRI")
 
     def test_numeric_consensus_outvotes_single_wrong_detector(self) -> None:
         result = local_ocr_resolver.numeric_candidate_consensus(
@@ -454,6 +714,81 @@ class FormationResolutionTests(unittest.TestCase):
             {group[0].shirt_number for group in selected},
             {1, 2},
         )
+
+    def test_table_allows_same_surname_in_different_rows(self) -> None:
+        observations = [
+            resolver.PairObservation(
+                shirt_number=number, player_name=name,
+                number_score=0.99, name_score=0.99,
+                frame_index=frame_index, timestamp_seconds=float(frame_index),
+                center_x=0.10, center_y=center_y, label_x1=0.12,
+                relation="inline",
+            )
+            for frame_index in (1, 2)
+            for number, name, center_y in (
+                (14, "BERISHA", 0.30),
+                (23, "B. BERISHA", 0.70),
+            )
+        ]
+
+        selected = resolver.select_table_pairs(observations, expected_players=2)
+
+        self.assertEqual({group[0].shirt_number for group in selected}, {14, 23})
+
+    def test_table_events_split_when_team_names_change(self) -> None:
+        observations = [
+            resolver.PairObservation(
+                shirt_number=number,
+                player_name=f"{team} PLAYER {number}",
+                number_score=0.99,
+                name_score=0.99,
+                frame_index=frame_index,
+                timestamp_seconds=timestamp,
+                center_x=0.10,
+                center_y=0.10 + number * 0.04,
+                label_x1=0.12,
+                relation="inline",
+            )
+            for team, frame_index, timestamp in (
+                ("HOME", 1, 1.0), ("HOME", 2, 2.0),
+                ("AWAY", 3, 4.0), ("AWAY", 4, 5.0),
+            )
+            for number in range(1, 12)
+        ]
+
+        events = resolver.split_table_events(observations, 20.0, 0.45)
+
+        self.assertEqual(len(events), 2)
+        self.assertEqual({row.frame_index for row in events[0]}, {1, 2})
+        self.assertEqual({row.frame_index for row in events[1]}, {3, 4})
+
+    def test_resolves_two_table_events_from_one_clip(self) -> None:
+        teams = {
+            "HOME": ("ALPHA", "BRAVO", "CHARLIE"),
+            "AWAY": ("DELTA", "ECHO", "FOXTROT"),
+        }
+        rows = []
+        for team_index, (team, names) in enumerate(teams.items()):
+            for frame_offset in range(2):
+                frame_index = team_index * 2 + frame_offset + 1
+                for number, name in enumerate(names, start=1):
+                    row = detection(
+                        frame_index=frame_index,
+                        timestamp_seconds=float(frame_index),
+                        text=f"{number} {name}", text_type="text",
+                        x=0.15, y=0.2 + number * 0.08,
+                    )
+                    row.update(video="match.mp4", segment_index=1)
+                    rows.append(row)
+
+        records, best_count = resolver.resolve_table_events(
+            pd.DataFrame(rows), expected_players=3,
+            max_gap_seconds=20.0, signature_threshold=0.45,
+        )
+
+        self.assertEqual(best_count, 3)
+        self.assertEqual(len(records), 6)
+        self.assertEqual({row["lineup_index"] for row in records}, {1, 2})
 
     def test_number_gap_is_learned_from_current_layout(self) -> None:
         compact = pd.DataFrame(

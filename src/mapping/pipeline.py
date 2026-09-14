@@ -10,7 +10,8 @@ from .engine import create_ocr, run_ocr, write_csv
 from .frames import (LineupOCRError, SegmentKey, extract_segment_frames,
                      group_records_by_segment, load_lineup_clips, segment_key)
 from .resolver import (LineupResolutionError, QualityResult,
-                       evaluate_segment_quality, resolve_all_lineups)
+                       evaluate_segment_quality, resolve_all_lineups,
+                       select_match_lineups)
 from . import schema
 from .selection_io import materialize_selected_frames, selection_diagnostic_rows
 from .selector import (
@@ -49,6 +50,7 @@ class WorkflowState:
     final_tier: dict[SegmentKey, str] = field(default_factory=dict)
     attempt_rows: RecordList = field(default_factory=list)
     final_selection: dict[SegmentKey, SegmentSelection] = field(default_factory=dict)
+    match_quality: QualityResult | None = None
     def apply(
         self, outcome: AttemptOutcome, selections: dict[SegmentKey, SegmentSelection],
         *, final: bool = False,
@@ -93,7 +95,9 @@ def _for_keys(rows: Iterable[Record], keys: list[SegmentKey]) -> GroupedRecords:
 
 
 def _resolve(
-    keys: list[SegmentKey], detections: GroupedRecords, config: PipelineConfig
+    keys: list[SegmentKey], detections: GroupedRecords, config: PipelineConfig,
+    reference_detections: GroupedRecords | None = None,
+    expected_lineups: int = 1,
 ) -> tuple[GroupedRecords, DiagnosticMap]:
     flat = [row for key in keys for row in detections[key]]
     try:
@@ -103,6 +107,12 @@ def _resolve(
             pd.DataFrame(flat), config.players_per_lineup, config.min_number_count,
             config.same_lineup_gap_seconds, config.signature_threshold,
             enable_local_ocr=not config.disable_local_ocr,
+            reference_detections=pd.DataFrame(
+                row
+                for key in keys
+                for row in (reference_detections or {}).get(key, [])
+            ),
+            expected_lineups=expected_lineups,
         )
     except LineupResolutionError as exc:
         resolved = []
@@ -125,6 +135,8 @@ def perform_attempt(
     *, keys: list[SegmentKey], attempt: int, tier: str,
     target_records: RecordList, previous_records: GroupedRecords,
     previous_detections: GroupedRecords, ocr: object, config: PipelineConfig,
+    reference_detections: GroupedRecords | None = None,
+    expected_lineups: int = 1,
 ) -> AttemptOutcome:
     targets = _for_keys(target_records, keys)
     new_records: RecordList = []
@@ -147,13 +159,16 @@ def perform_attempt(
     )
     fresh = group_records_by_segment(new_detections)
     detections = {key: reused[key] + fresh.get(key, []) for key in keys}
-    resolved, diagnostics = _resolve(keys, detections, config)
+    resolved, diagnostics = _resolve(
+        keys, detections, config, reference_detections, expected_lineups
+    )
     quality: dict[SegmentKey, QualityResult] = {}
     attempt_rows: RecordList = []
     for key in keys:
         diagnostic = diagnostics[key] or None
         result = evaluate_segment_quality(
-            resolved[key], diagnostic, config.players_per_lineup, config.min_pair_confidence
+            resolved[key], diagnostic, config.players_per_lineup,
+            config.min_pair_confidence, expected_lineups,
         )
         quality[key] = result
         attempt_rows.append(
@@ -179,6 +194,11 @@ def _full_records(records: RecordList) -> RecordList:
         "crop_x1_norm": 0.0, "crop_x2_norm": 1.0,
     }
     return [dict(row, source_frame_path=row["frame_path"], **metadata) for row in records]
+
+
+def lineups_expected_in_segment(segment_count: int, lineups_per_match: int) -> int:
+    """A lone clip may contain the match; multiple clips keep their one-team fast path."""
+    return lineups_per_match if segment_count == 1 else 1
 
 
 class LineupWorkflow:
@@ -207,15 +227,17 @@ class LineupWorkflow:
         full.update(pending)
         if full:
             self._run_full_tier(full)
+        match_quality = self._finalize_match()
         self._write_outputs()
         state = self._state()
         passed = sum(result.passed for result in state.final_quality.values())
         players = sum(map(len, state.final_records.values()))
         print(f"Pipeline complete: {passed}/{len(state.ordered_keys)} segment(s) passed "
               f"the quality gate; {players} player rows.")
+        print(match_quality.message)
         print(f"Resolved lineups: {self.config.resolved_output_csv}")
         print(f"Attempt diagnostics: {self.config.attempts_csv}")
-        return 0 if passed == len(state.ordered_keys) else 2
+        return 0 if match_quality.passed else 2
     def _extract_frames(self) -> RecordList:
         segments = load_lineup_clips(self.config.clips_dir)
         records: RecordList = []
@@ -250,7 +272,12 @@ class LineupWorkflow:
         self, keys: set[SegmentKey], attempt: int, frame_count: int
     ) -> tuple[set[SegmentKey], set[SegmentKey]]:
         source = [row for row in self.frames if segment_key(row) in keys]
-        selections = select_segment_frames(source, self.scout, frame_count, self.config.scout_fps)
+        expected_lineups = lineups_expected_in_segment(
+            len(self._state().ordered_keys), self.config.lineups_per_match
+        )
+        selections = select_segment_frames(
+            source, self.scout, frame_count, self.config.scout_fps, expected_lineups
+        )
         selected = {(item.video, item.segment_index): item for item in selections
                     if item.status == "selected"}
         direct_full = {
@@ -284,8 +311,25 @@ class LineupWorkflow:
             keys=keys, attempt=attempt, tier=tier, target_records=frames,
             previous_records=state.active_frames,
             previous_detections=state.active_detections,
+            reference_detections=(
+                group_records_by_segment(self.scout.to_dict("records"))
+                if not self.scout.empty
+                else {}
+            ),
+            expected_lineups=lineups_expected_in_segment(
+                len(state.ordered_keys), self.config.lineups_per_match
+            ),
             ocr=self.ocr, config=self.config,
         )
+    def _finalize_match(self) -> QualityResult:
+        state = self._state()
+        records = [row for rows in state.final_records.values() for row in rows]
+        selected, quality = select_match_lineups(
+            records, self.config.lineups_per_match, self.config.players_per_lineup
+        )
+        state.final_records = group_records_by_segment(selected) if quality.passed else {}
+        state.match_quality = quality
+        return quality
     def _write_outputs(self) -> None:
         state = self._state()
         missing = set(state.ordered_keys) - set(state.final_quality)
@@ -320,14 +364,23 @@ class LineupWorkflow:
             if quality.passed
             else f"quality gate failed after {tier}: {quality.message}"
         )
-        message = "; ".join(
-            part for part in (str(diagnostic.get("message", "")).strip(), quality_message) if part
+        match_quality = state.match_quality
+        match_message = (
+            ""
+            if match_quality is None or match_quality.passed
+            else f"match quality gate failed: {match_quality.message}"
         )
+        message = "; ".join(
+            part for part in (
+                str(diagnostic.get("message", "")).strip(), quality_message, match_message,
+            ) if part
+        )
+        passed = quality.passed and bool(match_quality and match_quality.passed)
         return {
             "video": key[0], "segment_index": key[1],
-            "status": "resolved" if quality.passed else "unresolved",
+            "status": "resolved" if passed else "unresolved",
             "resolution_method": (
-                str(diagnostic.get("resolution_method", "")) if quality.passed else ""
+                str(diagnostic.get("resolution_method", "")) if passed else ""
             ),
             "resolved_players": quality.resolved_players, "message": message,
         }

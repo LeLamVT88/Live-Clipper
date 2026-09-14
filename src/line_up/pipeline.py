@@ -8,7 +8,7 @@ from line_up.config import PipelineConfig
 from line_up.schema import DetectionResult, FrameSampleResult, LineupInterval
 from line_up.scene_detector import detect_scenes
 from line_up.sampler import get_scene_sample_timestamps
-from ocr_engine import get_ocr_model, extract_frames_at_timestamps, run_ocr_batch
+from line_up.ocr import get_ocr_model, extract_frames_at_timestamps, run_ocr_batch
 from line_up.scorer import compute_lineup_score
 from line_up.interval_proposer import propose_lineups
 from line_up.multimodal import (
@@ -41,7 +41,14 @@ def detect_lineups(
     cap = cv2.VideoCapture(str(vpath))
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    video_duration = min(total_frames / fps, cfg.max_scan_seconds)
+    source_duration = total_frames / fps
+    if cfg.max_scan_seconds is not None and cfg.max_scan_seconds <= 0:
+        raise ValueError("max_scan_seconds must be positive or None.")
+    video_duration = (
+        source_duration
+        if cfg.max_scan_seconds is None
+        else min(source_duration, cfg.max_scan_seconds)
+    )
     cap.release()
 
     # 1. Fast Scene Detection

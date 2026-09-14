@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import cv2
 import numpy as np
@@ -118,6 +119,39 @@ class ScoutSamplingTests(unittest.TestCase):
 
 
 class SegmentSelectionTests(unittest.TestCase):
+    def test_one_clip_selects_frames_from_two_stable_scenes(self) -> None:
+        timestamps = [0.0, 2.0, 4.0, 12.0, 14.0, 16.0]
+        records = [
+            frame_record(index, timestamp)
+            for index, timestamp in enumerate(timestamps, start=1)
+        ]
+        detections = pd.DataFrame([
+            detection(
+                frame_index=index, timestamp_seconds=timestamp,
+                text="PLAYER", text_type="text", x=0.5, y=0.5,
+            )
+            for index, timestamp in enumerate(timestamps, start=1)
+        ])
+        candidates = [
+            selector.FrameCandidate(
+                video="match.mp4", segment_index=1, frame_index=index,
+                timestamp_seconds=timestamp, layout="formation", score=50.0,
+                formation_anchor_count=11, table_pair_count=0,
+                number_count=11, name_count=11,
+                crop_x1_norm=0.0, crop_x2_norm=1.0,
+            )
+            for index, timestamp in enumerate(timestamps, start=1)
+        ]
+
+        with patch.object(selector, "score_frame_candidate", side_effect=candidates):
+            selections = selector.select_segment_frames(
+                records, detections, selected_frame_count=3,
+                scout_fps=0.5, expected_lineups=2,
+            )
+
+        self.assertEqual(selections[0].layout, "multiple_lineups")
+        self.assertEqual(selections[0].selected_frame_indices, (1, 2, 3, 4, 5, 6))
+
     def test_selects_three_frames_and_crops_opposite_substitutes(self) -> None:
         records = [frame_record(index, (index - 1) * 0.5) for index in range(1, 9)]
         detections = pd.DataFrame(left_substitutes_formation(5, 2.0))
@@ -136,6 +170,53 @@ class SegmentSelectionTests(unittest.TestCase):
         self.assertEqual(selection.crop_side, "right")
         self.assertGreater(selection.crop_x1_norm, 0.25)
         self.assertEqual(selection.selected_frame_indices, (4, 5, 6))
+
+    def test_crop_preserves_the_complete_formation_label_box(self) -> None:
+        rows = [
+            detection(
+                frame_index=1,
+                timestamp_seconds=2.0,
+                text="SUBSTITUTES",
+                text_type="text",
+                x=0.15,
+                y=0.15,
+            )
+        ]
+        for number, name, x, y in [
+            ("2", "JOÃO CANCELO", 0.36, 0.40),
+            ("8", "PEDRI", 0.60, 0.40),
+            ("9", "LEWANDOWSKI", 0.75, 0.60),
+        ]:
+            number_row = detection(
+                frame_index=1,
+                timestamp_seconds=2.0,
+                text=number,
+                text_type="shirt_number_candidate",
+                x=x,
+                y=y,
+            )
+            name_row = detection(
+                frame_index=1,
+                timestamp_seconds=2.0,
+                text=name,
+                text_type="text",
+                x=x,
+                y=y + 0.06,
+            )
+            if name == "JOÃO CANCELO":
+                name_row["x1"] = 56  # 0.28 of the full frame, left of the panel boundary.
+                name_row["x2"] = 88
+            rows.extend([number_row, name_row])
+        frame = pd.DataFrame(rows)
+        panel = selector.find_substitute_panel(frame)
+
+        self.assertIsNotNone(panel)
+        assert panel is not None
+        candidate = selector.score_frame_candidate(frame, panel)
+
+        self.assertIsNotNone(candidate)
+        assert candidate is not None
+        self.assertLessEqual(candidate.crop_x1_norm, 0.27)
 
     def test_falls_back_to_all_frames_without_candidate(self) -> None:
         records = [frame_record(index, (index - 1) * 0.5) for index in range(1, 5)]

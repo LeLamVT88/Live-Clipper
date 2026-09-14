@@ -7,8 +7,8 @@ from dataclasses import dataclass
 class PipelineConfig:
     """Configuration parameters for the lineup detection pipeline."""
 
-    # Video Scan Window
-    max_scan_seconds: float = 600.0  # Typically first 10 minutes covers pre-match lineups
+    # Video Scan Window. None scans the complete input video.
+    max_scan_seconds: float | None = None
 
     # PySceneDetect Settings
     adaptive_threshold: float = 3.0

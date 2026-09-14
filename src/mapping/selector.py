@@ -18,6 +18,8 @@ from .resolver.table import table_pair_observations
 
 
 SEGMENT_KEY_COLUMNS = ["video", "segment_index"]
+CROP_PADDING_NORM = 0.01
+SCENE_GAP_PERIODS = 2.1
 
 
 class LineupFrameSelectionError(Exception): pass
@@ -59,6 +61,59 @@ class SegmentSelection(CandidateStats):
     message: str
 
 
+def _horizontal_box(row: pd.Series) -> tuple[float, float]:
+    """Return normalized horizontal bounds, falling back to the OCR center."""
+    width = float(row.get("frame_width", 0) or 0)
+    try:
+        if width > 0:
+            return float(row["x1"]) / width, float(row["x2"]) / width
+    except (KeyError, TypeError, ValueError):
+        pass
+    center = float(row["center_x_norm"])
+    return center, center
+
+
+def safe_formation_crop(
+    panel: SubstitutePanel,
+    formation_frame: pd.DataFrame,
+) -> tuple[float, float]:
+    """Crop the substitute panel without cutting any retained OCR box."""
+    protected = [row for _, row in formation_frame.iterrows()]
+    if not protected:
+        return (
+            (panel.boundary, 1.0)
+            if panel.side == "left"
+            else (0.0, panel.boundary)
+        )
+    if panel.side == "left":
+        left_edge = min(_horizontal_box(row)[0] for row in protected)
+        return max(0.0, min(panel.boundary, left_edge - CROP_PADDING_NORM)), 1.0
+    right_edge = max(_horizontal_box(row)[1] for row in protected)
+    return 0.0, min(1.0, max(panel.boundary, right_edge + CROP_PADDING_NORM))
+
+
+def find_table_formation_panel(frame: pd.DataFrame) -> SubstitutePanel | None:
+    """Find a side list shown alongside a formation, without mistaking a plain table."""
+    observations = table_pair_observations(frame)
+    sides = {
+        "left": [item for item in observations if item.center_x < 0.35],
+        "right": [item for item in observations if item.center_x > 0.65],
+    }
+    side, rows = max(sides.items(), key=lambda item: len(item[1]))
+    if len(rows) < 4:
+        return None
+    center = float(pd.Series([item.center_x for item in rows]).median())
+    boundary = min(0.5, center + 0.18) if side == "left" else max(0.5, center - 0.18)
+    retained = frame[
+        frame["center_x_norm"] >= boundary
+        if side == "left"
+        else frame["center_x_norm"] <= boundary
+    ]
+    if len(formation_anchor_pairs(retained)) < 3:
+        return None
+    return SubstitutePanel(side, boundary, float(frame["timestamp_seconds"].iloc[0]))
+
+
 def sample_scout_frames(frame_records: list[dict[str, object]], scout_fps: float) -> list[dict[str, object]]:
     if scout_fps <= 0:
         raise LineupFrameSelectionError("scout_fps must be positive.")
@@ -96,6 +151,8 @@ def score_frame_candidate(frame: pd.DataFrame, panel: SubstitutePanel | None) ->
             frame[frame["center_x_norm"] <= panel.boundary], 0.0, panel.boundary
         )
     anchors = formation_anchor_pairs(formation_frame)
+    if panel_active:
+        crop_x1, crop_x2 = safe_formation_crop(panel, formation_frame)
     number_count = len(shirt_number_rows(formation_frame))
     name_count = sum(
         1
@@ -151,7 +208,7 @@ def choose_spread_frame_indices(
     # Sparse scout OCR can miss one otherwise stable lineup frame.  Allow a
     # little over two scout periods so the detail frames still span the same
     # graphic scene instead of clustering around the best frame.
-    maximum_gap = 2.1 * scout_period_seconds
+    maximum_gap = SCENE_GAP_PERIODS * scout_period_seconds
     start = best_position
     while (
         start > 0
@@ -218,14 +275,34 @@ def fallback_selection(
     )
 
 
+def candidate_scenes(
+    candidates: list[FrameCandidate], scout_period_seconds: float,
+) -> list[list[FrameCandidate]]:
+    """Split structural candidates at layout changes or missing-frame gaps."""
+    scenes: list[list[FrameCandidate]] = []
+    maximum_gap = SCENE_GAP_PERIODS * scout_period_seconds
+    for candidate in sorted(candidates, key=lambda item: item.timestamp_seconds):
+        if (
+            not scenes
+            or candidate.layout != scenes[-1][-1].layout
+            or candidate.timestamp_seconds - scenes[-1][-1].timestamp_seconds > maximum_gap
+        ):
+            scenes.append([candidate])
+        else:
+            scenes[-1].append(candidate)
+    return scenes
+
+
 def select_segment_frames(
     frame_records: list[dict[str, object]], scout_detections: pd.DataFrame,
-    selected_frame_count: int, scout_fps: float,
+    selected_frame_count: int, scout_fps: float, expected_lineups: int = 1,
 ) -> list[SegmentSelection]:
     if selected_frame_count <= 0:
         raise LineupFrameSelectionError("selected_frame_count must be positive.")
     if scout_fps <= 0:
         raise LineupFrameSelectionError("scout_fps must be positive.")
+    if expected_lineups <= 0:
+        raise LineupFrameSelectionError("expected_lineups must be positive.")
     records_by_segment = group_records_by_segment(frame_records)
     detections_by_segment = (
         {
@@ -243,7 +320,9 @@ def select_segment_frames(
         candidates: list[FrameCandidate] = []
         if not segment_detections.empty:
             for _, frame in segment_detections.groupby("frame_index", sort=True):
-                candidate = score_frame_candidate(frame, panel)
+                candidate = score_frame_candidate(
+                    frame, find_table_formation_panel(frame) or panel
+                )
                 if candidate is not None:
                     candidates.append(candidate)
         if not candidates:
@@ -252,28 +331,50 @@ def select_segment_frames(
         def score(candidate: FrameCandidate) -> tuple[float, float, int]:
             neighbors = sum(
                 other.layout == candidate.layout
-                and abs(other.timestamp_seconds - candidate.timestamp_seconds) <= 2.1 * scout_period
+                and abs(other.timestamp_seconds - candidate.timestamp_seconds)
+                <= SCENE_GAP_PERIODS * scout_period
                 for other in candidates
             )
             return (
                 candidate.score + 3 * min(neighbors, 4),
                 candidate.timestamp_seconds, candidate.frame_index,
             )
-        best = max(candidates, key=score)
-        selected_indices = choose_spread_frame_indices(
-            segment_records,
-            candidates=candidates,
-            best=best,
-            count=selected_frame_count,
-            scout_period_seconds=scout_period,
+        ranked_scenes = sorted(
+            (
+                (max(scene, key=score), scene)
+                for scene in candidate_scenes(candidates, scout_period)
+            ),
+            key=lambda item: score(item[0]),
+            reverse=True,
         )
+        chosen_scenes = ranked_scenes[:expected_lineups]
+        best = chosen_scenes[0][0]
+        selected_indices = tuple(sorted({
+            frame_index
+            for leader, scene in chosen_scenes
+            for frame_index in choose_spread_frame_indices(
+                segment_records, scene, leader, selected_frame_count, scout_period,
+            )
+        }))
         data = asdict(best)
         frame_index, timestamp = data.pop("frame_index"), data.pop("timestamp_seconds")
-        data["score"] = score(best)[0]
+        data["score"] = sum(score(leader)[0] for leader, _ in chosen_scenes)
+        if len(chosen_scenes) > 1:
+            crops = {
+                (leader.crop_x1_norm, leader.crop_x2_norm)
+                for leader, _ in chosen_scenes
+            }
+            crop_x1 = min(x1 for x1, _ in crops) if all(x2 == 1.0 for _, x2 in crops) else 0.0
+            crop_x2 = max(x2 for _, x2 in crops) if all(x1 == 0.0 for x1, _ in crops) else 1.0
+            data.update(
+                layout="multiple_lineups",
+                crop_x1_norm=crop_x1,
+                crop_x2_norm=crop_x2,
+            )
         selections.append(SegmentSelection(
             **data, status="selected", scout_frame_index=frame_index,
             scout_timestamp_seconds=timestamp, selected_frame_indices=selected_indices,
-            message=(f"Selected {len(selected_indices)} detailed OCR frame(s) across the stable "
-                     f"scene containing scout frame {best.frame_index}."),
+            message=(f"Selected {len(selected_indices)} detailed OCR frame(s) across "
+                     f"{len(chosen_scenes)} stable lineup scene(s)."),
         ))
     return selections

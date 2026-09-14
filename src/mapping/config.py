@@ -46,6 +46,7 @@ class PipelineConfig:
     initial_frame_count: int = 3
     expanded_frame_count: int = 7
     players_per_lineup: int = 11
+    lineups_per_match: int = 2
     min_number_count: int = 8
     same_lineup_gap_seconds: float = 20.0
     signature_threshold: float = 0.45
@@ -70,8 +71,10 @@ class PipelineConfig:
             (self.initial_frame_count > 0, "--initial-frame-count must be positive."),
             (self.expanded_frame_count > self.initial_frame_count,
              "--expanded-frame-count must exceed --initial-frame-count."),
-            (self.players_per_lineup > 0 and self.min_number_count > 0,
-             "--players-per-lineup and --min-number-count must be positive."),
+            (self.players_per_lineup > 0 and self.lineups_per_match > 0
+             and self.min_number_count > 0,
+             "--players-per-lineup, --lineups-per-match, and --min-number-count "
+             "must be positive."),
             (self.same_lineup_gap_seconds >= 0, "--same-lineup-gap-seconds cannot be negative."),
             (0 <= self.signature_threshold <= 1, "--signature-threshold must be between 0 and 1."),
             (0 <= self.min_pair_confidence <= 1, "--min-pair-confidence must be between 0 and 1."),
@@ -94,7 +97,8 @@ def build_parser() -> argparse.ArgumentParser:
         "fps": (float, 2.0), "scout-fps": (float, 0.5), "jpeg-quality": (int, 95),
         "min-score": (float, 0.80), "ocr-batch-size": (int, 8),
         "initial-frame-count": (int, 3), "expanded-frame-count": (int, 7),
-        "players-per-lineup": (int, 11), "min-number-count": (int, 8),
+        "players-per-lineup": (int, 11), "lineups-per-match": (int, 2),
+        "min-number-count": (int, 8),
         "same-lineup-gap-seconds": (float, 20.0), "signature-threshold": (float, 0.45),
         "min-pair-confidence": (float, 0.80),
     }

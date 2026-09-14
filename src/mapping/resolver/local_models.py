@@ -14,6 +14,7 @@ from .common import LineupResolutionError
 
 LOCAL_CACHE_DIR = PROJECT_ROOT / ".cache" / "paddlex"
 PIXEL_GEOMETRY_COLUMNS = {"x1", "x2", "y1", "y2", "center_x", "center_y"}
+NUMBER_SOURCE_COLUMN = "_number_source"
 
 
 def create_local_table_ocr():
@@ -56,6 +57,7 @@ def numeric_observation(
             "text": str(shirt_number), "text_type": "shirt_number_candidate",
             "score": round(score, 6), "center_x_norm": round(center_x, 6),
             "center_y_norm": round(center_y, 6),
+            NUMBER_SOURCE_COLUMN: "local_ocr",
         }
     )
     if not include_pixel_geometry:
@@ -77,7 +79,10 @@ def append_refinement_rows(
 ) -> tuple[pd.DataFrame, int]:
     if not rows:
         return segment, 0
-    refined = pd.concat([segment, pd.DataFrame(rows, columns=segment.columns)], ignore_index=True)
+    base = segment.copy()
+    if NUMBER_SOURCE_COLUMN not in base.columns:
+        base[NUMBER_SOURCE_COLUMN] = "detector"
+    refined = pd.concat([base, pd.DataFrame(rows)], ignore_index=True)
     return refined, len(rows)
 
 

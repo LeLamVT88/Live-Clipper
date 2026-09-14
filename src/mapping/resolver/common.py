@@ -11,14 +11,14 @@ import pandas as pd
 
 
 IGNORED_TEXT = {
-    "bre", "crypto", "defence", "expedia", "fifaplus com", "football club",
+    "bre", "coach", "crypto", "defence", "expedia", "fifaplus com", "football club",
     "forwards", "goalkeeper", "hisense", "hollywood", "lfc", "midfield",
     "premier league", "standard", "standard chartered", "starting formation",
     "substitutes", "team", "team formation", "formation", "vivo",
 }
 IGNORED_TEXT_MARKERS = {"crypto", "fifaplus", "hisense"}
 TABLE_IGNORED_TEXT = IGNORED_TEXT | {
-    "captain", "coach", "df", "elite", "fw", "gk", "head coach", "mf", "team lineup",
+    "captain", "df", "elite", "fw", "gk", "head coach", "mf", "team lineup",
 }
 
 
@@ -98,14 +98,11 @@ def is_name_like(text: object) -> bool:
     if any(marker in normalized.replace(" ", "") for marker in IGNORED_TEXT_MARKERS):
         return False
     letters = sum(character.isalpha() for character in normalized)
-    if letters < 2 or len(normalized) > 40:
-        return False
-    return not normalized.isdigit()
+    return letters >= 2 and len(normalized) <= 40
 
 
 def is_table_name_like(text: object) -> bool:
-    normalized = normalize_text(text)
-    return normalized not in TABLE_IGNORED_TEXT and is_name_like(text)
+    return normalize_text(text) not in TABLE_IGNORED_TEXT and is_name_like(text)
 
 
 def parse_inline_player(text: object) -> tuple[int, str] | None:
@@ -155,9 +152,21 @@ def detections_without_substitute_panel(segment: pd.DataFrame) -> pd.DataFrame:
     panel = find_substitute_panel(segment)
     if panel is None:
         return segment
-    panel_frames = segment["timestamp_seconds"] >= panel.first_timestamp_seconds
     panel_side = (segment["center_x_norm"] < panel.boundary if panel.side == "left"
                   else segment["center_x_norm"] > panel.boundary)
+    earlier_panel = segment[
+        panel_side
+        & (segment["timestamp_seconds"] < panel.first_timestamp_seconds)
+    ]
+    starter_list_visible = any(
+        sum(parse_inline_player(text) is not None for text in frame["text"]) >= 4
+        for _, frame in earlier_panel.groupby("frame_index")
+    )
+    panel_frames = (
+        pd.Series(True, index=segment.index)
+        if starter_list_visible
+        else segment["timestamp_seconds"] >= panel.first_timestamp_seconds
+    )
     return segment[~(panel_frames & panel_side)]
 
 

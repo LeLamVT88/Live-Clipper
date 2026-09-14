@@ -6,11 +6,11 @@ import pandas as pd
 
 from .common import LineupResolutionError
 from .formation import attempt_formation_resolution
-from .formation_refinement import refine_formation_numbers
 from .layout import formation_refinement_frames
 from .local_models import create_local_number_recognizer, create_local_table_ocr
-from .table import resolve_table_layout
-from .table_refinement import refine_table_numbers
+from .player_names import enrich_player_names
+from .refinement import refine_formation_numbers, refine_table_numbers
+from .table import resolve_table_events
 
 
 @dataclass(slots=True)
@@ -39,15 +39,23 @@ LOCAL_OCR_ERRORS = (ImportError, LineupResolutionError, ModuleNotFoundError, OSE
 
 def resolve_table(
     segment: pd.DataFrame, *, expected_players: int, enable_local_ocr: bool,
+    expected_lineups: int, max_gap_seconds: float, signature_threshold: float,
     models: LocalOCRModels, messages: list[str],
 ) -> tuple[ResolutionResult, pd.DataFrame]:
-    table_records, table_count = resolve_table_layout(segment, expected_players)
-    if table_records:
+    table_records, table_count = resolve_table_events(
+        segment, expected_players, max_gap_seconds, signature_threshold
+    )
+    expected_total = expected_players * expected_lineups
+    if len(table_records) == expected_total:
         messages.append("Complete repeated table/list consensus.")
         return ResolutionResult(table_records, "table"), segment
-    if table_count:
-        messages.append(f"table/list pass found {table_count}/{expected_players} players")
-    can_refine = enable_local_ocr and 4 <= table_count < expected_players
+    if table_records or table_count:
+        messages.append(
+            f"table/list pass resolved {len(table_records) // expected_players}/"
+            f"{expected_lineups} lineup(s); best event {table_count}/{expected_players} players"
+        )
+    can_refine = enable_local_ocr and len(table_records) < expected_total
+    can_refine &= table_count >= 4
     can_refine &= "frame_path" in segment.columns
     if not can_refine:
         return ResolutionResult([]), segment
@@ -58,8 +66,10 @@ def resolve_table(
         if not added_count:
             return ResolutionResult([]), segment
         messages.append(f"local table OCR added {added_count} number observations")
-        table_records, _ = resolve_table_layout(refined, expected_players)
-        if table_records:
+        table_records, _ = resolve_table_events(
+            refined, expected_players, max_gap_seconds, signature_threshold
+        )
+        if len(table_records) == expected_total:
             for record in table_records:
                 record["resolution_method"] = "table+local_ocr"
             return ResolutionResult(table_records, "table+local_ocr"), refined
@@ -94,7 +104,7 @@ def refine_formation(
 def resolve_formation(
     segment: pd.DataFrame, *, expected_players: int, min_number_count: int,
     max_gap_seconds: float, signature_threshold: float, enable_local_ocr: bool,
-    models: LocalOCRModels, messages: list[str],
+    models: LocalOCRModels, messages: list[str], expected_lineups: int = 1,
 ) -> ResolutionResult:
     resolution_args = {
         "expected_players": expected_players,
@@ -105,7 +115,11 @@ def resolve_formation(
     _, initial_events, initial_records, initial_errors = attempt_formation_resolution(
         segment, **resolution_args
     )
-    if initial_events and not initial_errors:
+    if (
+        initial_events
+        and not initial_errors
+        and len(initial_records) == expected_players * expected_lineups
+    ):
         return ResolutionResult(initial_records, "formation")
     refined = refine_formation(
         segment, enable_local_ocr=enable_local_ocr, models=models, messages=messages
@@ -137,6 +151,8 @@ def resolve_all_lineups(
     max_gap_seconds: float,
     signature_threshold: float,
     enable_local_ocr: bool = True,
+    reference_detections: pd.DataFrame | None = None,
+    expected_lineups: int = 1,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     records: list[dict[str, object]] = []
     diagnostics: list[dict[str, object]] = []
@@ -146,6 +162,8 @@ def resolve_all_lineups(
         messages: list[str] = []
         result, segment = resolve_table(
             segment, expected_players=expected_players, enable_local_ocr=enable_local_ocr,
+            expected_lineups=expected_lineups, max_gap_seconds=max_gap_seconds,
+            signature_threshold=signature_threshold,
             models=models, messages=messages,
         )
         if not result.records:
@@ -153,7 +171,24 @@ def resolve_all_lineups(
                 segment, expected_players=expected_players, min_number_count=min_number_count,
                 max_gap_seconds=max_gap_seconds, signature_threshold=signature_threshold,
                 enable_local_ocr=enable_local_ocr, models=models, messages=messages,
+                expected_lineups=expected_lineups,
             )
+        for record in result.records:
+            record.setdefault(
+                "number_source",
+                "table" if result.method.startswith("table") else "detector",
+            )
+            record.setdefault("name_source", "resolver")
+        if (
+            result.records
+            and reference_detections is not None
+            and not reference_detections.empty
+        ):
+            reference_segment = reference_detections[
+                (reference_detections["video"] == video)
+                & (reference_detections["segment_index"] == segment_index)
+            ]
+            result.records = enrich_player_names(result.records, reference_segment)
         records.extend(result.records)
         diagnostics.append({
             "video": video, "segment_index": int(segment_index),
