@@ -39,6 +39,53 @@ def detection(
 
 
 class SubstitutePanelMaskTests(unittest.TestCase):
+    def test_presentation_scenes_restart_after_substitutes_and_transition(self) -> None:
+        rows = [
+            detection(frame_index=frame_index, timestamp_seconds=float(frame_index),
+                      text=f"{number} HOME {number}", text_type="text",
+                      x=0.15, y=0.15 + number * 0.08)
+            for frame_index in (1, 2)
+            for number in range(1, 5)
+        ]
+        rows.extend([
+            detection(frame_index=3, timestamp_seconds=3.0, text="SUBSTITUTES",
+                      text_type="text", x=0.15, y=0.10),
+            detection(frame_index=4, timestamp_seconds=4.0, text="LIVE",
+                      text_type="text", x=0.90, y=0.10),
+        ])
+        rows.extend(
+            detection(frame_index=frame_index, timestamp_seconds=float(frame_index),
+                      text=f"{number} AWAY {number}", text_type="text",
+                      x=0.15, y=0.15 + number * 0.08)
+            for frame_index in (5, 6)
+            for number in range(1, 5)
+        )
+
+        scenes = resolver.split_presentation_scenes(pd.DataFrame(rows))
+
+        self.assertEqual(len(scenes), 2)
+        self.assertEqual(
+            scenes[0]["frame_index"].unique().tolist(), [1, 2, 3, 4]
+        )
+        self.assertEqual(scenes[1]["frame_index"].unique().tolist(), [5, 6])
+
+    def test_missing_substitutes_header_does_not_create_a_new_scene(self) -> None:
+        rows = [
+            detection(frame_index=1, timestamp_seconds=1.0, text="SUBSTITUTES",
+                      text_type="text", x=0.15, y=0.10)
+        ]
+        rows.extend(
+            detection(frame_index=frame_index, timestamp_seconds=float(frame_index),
+                      text=f"{number} RESERVE {number}", text_type="text",
+                      x=0.15, y=0.15 + number * 0.08)
+            for frame_index in (1, 2, 3)
+            for number in range(1, 5)
+        )
+
+        scenes = resolver.split_presentation_scenes(pd.DataFrame(rows))
+
+        self.assertEqual(len(scenes), 1)
+
     def test_left_substitutes_panel_is_removed_from_following_frames(self) -> None:
         rows = [
             detection(
@@ -610,6 +657,56 @@ class FormationResolutionTests(unittest.TestCase):
         self.assertIn("LEFT WINGER", names)
         self.assertIn("RIGHT WINGER", names)
 
+    def test_recovery_names_are_not_clipped_to_the_anchor_vertical_band(self) -> None:
+        rows = [
+            detection(frame_index=1, timestamp_seconds=10.0, text="8",
+                      text_type="shirt_number_candidate", x=0.50, y=0.50),
+            detection(frame_index=1, timestamp_seconds=10.0, text="MIDFIELDER",
+                      text_type="text", x=0.50, y=0.56),
+            detection(frame_index=1, timestamp_seconds=10.0, text="TOP KEEPER",
+                      text_type="text", x=0.50, y=0.16),
+            detection(frame_index=1, timestamp_seconds=10.0, text="LOW STRIKER",
+                      text_type="text", x=0.50, y=0.96),
+        ]
+
+        names = resolver.layout.recovery_formation_name_rows(pd.DataFrame(rows))
+
+        self.assertEqual(
+            {str(row["text"]) for row in names},
+            {"MIDFIELDER", "TOP KEEPER", "LOW STRIKER"},
+        )
+
+    def test_name_based_recovery_selects_stable_full_formation_window(self) -> None:
+        rows: list[dict[str, object]] = []
+        for frame_index in (10, 11, 12):
+            timestamp = frame_index / 2
+            for player in range(11):
+                rows.append(detection(
+                    frame_index=frame_index,
+                    timestamp_seconds=timestamp,
+                    text=f"PLAYER {chr(65 + player)}",
+                    text_type="text",
+                    x=0.20 + (player % 4) * 0.16,
+                    y=0.20 + (player // 4) * 0.25,
+                ))
+            rows.append(detection(
+                frame_index=frame_index,
+                timestamp_seconds=timestamp,
+                text="1",
+                text_type="shirt_number_candidate",
+                x=0.20,
+                y=0.14,
+            ))
+
+        windows = resolver.layout.formation_recovery_windows(
+            pd.DataFrame(rows), expected_players=11
+        )
+
+        self.assertEqual([[item[0] for item in window] for window in windows], [[10, 11, 12]])
+
+    def test_name_based_recovery_has_a_number_gap_without_anchors(self) -> None:
+        self.assertEqual(resolver.formation_number_gap([]), 0.05)
+
     def test_table_rows_accept_split_and_inline_player_boxes(self) -> None:
         rows = [
             detection(
@@ -789,6 +886,47 @@ class FormationResolutionTests(unittest.TestCase):
         self.assertEqual(best_count, 3)
         self.assertEqual(len(records), 6)
         self.assertEqual({row["lineup_index"] for row in records}, {1, 2})
+
+    def test_substitutes_do_not_hide_the_next_team_in_a_merged_clip(self) -> None:
+        rows = []
+        for team, frame_indices in (("HOME", (1, 2)), ("AWAY", (5, 6))):
+            for frame_index in frame_indices:
+                for number in range(1, 5):
+                    row = detection(
+                        frame_index=frame_index,
+                        timestamp_seconds=float(frame_index),
+                        text=f"{number} {team} PLAYER {number}",
+                        text_type="text",
+                        x=0.15,
+                        y=0.15 + number * 0.08,
+                    )
+                    row.update(video="match.mp4", segment_index=1)
+                    rows.append(row)
+        for frame_index, text in ((3, "SUBSTITUTES"), (4, "LIVE")):
+            row = detection(
+                frame_index=frame_index,
+                timestamp_seconds=float(frame_index),
+                text=text,
+                text_type="text",
+                x=0.15,
+                y=0.10,
+            )
+            row.update(video="match.mp4", segment_index=1)
+            rows.append(row)
+
+        records, diagnostics = resolver.resolve_all_lineups(
+            pd.DataFrame(rows),
+            expected_players=4,
+            min_number_count=3,
+            max_gap_seconds=20.0,
+            signature_threshold=0.45,
+            enable_local_ocr=False,
+            expected_lineups=2,
+        )
+
+        self.assertEqual(len(records), 8)
+        self.assertEqual({row["lineup_index"] for row in records}, {1, 2})
+        self.assertEqual(diagnostics[0]["status"], "resolved")
 
     def test_number_gap_is_learned_from_current_layout(self) -> None:
         compact = pd.DataFrame(

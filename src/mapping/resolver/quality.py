@@ -178,15 +178,14 @@ def select_match_lineups(
         selected.append(candidate)
         if len(selected) == expected_lineups:
             break
-    if len(selected) != expected_lineups:
-        count = sum(len(rows) for _, rows in selected)
-        return [], QualityResult(
-            False, count,
-            f"match has {len(selected)}/{expected_lineups} distinct complete lineups",
-        )
     output: list[dict[str, object]] = []
     for lineup_index, (_, rows) in enumerate(sorted(selected), start=1):
         output.extend(dict(row, lineup_index=lineup_index) for row in rows)
+    if len(selected) != expected_lineups:
+        return output, QualityResult(
+            False, len(output),
+            f"match has {len(selected)}/{expected_lineups} distinct complete lineups",
+        )
     return output, QualityResult(
         True, len(output),
         f"match quality gate passed for {expected_lineups} lineups, {len(output)} players",

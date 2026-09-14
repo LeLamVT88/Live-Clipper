@@ -12,6 +12,7 @@ from .resolver.common import (
     normalize_text,
     parse_inline_player,
     shirt_number_rows,
+    split_presentation_scenes,
 )
 from .resolver.layout import formation_anchor_pairs
 from .resolver.table import table_pair_observations
@@ -316,15 +317,21 @@ def select_segment_frames(
     scout_period = 1.0 / scout_fps
     for key, segment_records in records_by_segment.items():
         segment_detections = detections_by_segment.get(key, pd.DataFrame())
-        panel = find_substitute_panel(segment_detections)
         candidates: list[FrameCandidate] = []
         if not segment_detections.empty:
-            for _, frame in segment_detections.groupby("frame_index", sort=True):
-                candidate = score_frame_candidate(
-                    frame, find_table_formation_panel(frame) or panel
-                )
-                if candidate is not None:
-                    candidates.append(candidate)
+            presentations = (
+                split_presentation_scenes(segment_detections)
+                if expected_lineups > 1
+                else [segment_detections]
+            )
+            for presentation in presentations:
+                panel = find_substitute_panel(presentation)
+                for _, frame in presentation.groupby("frame_index", sort=True):
+                    candidate = score_frame_candidate(
+                        frame, find_table_formation_panel(frame) or panel
+                    )
+                    if candidate is not None:
+                        candidates.append(candidate)
         if not candidates:
             selections.append(fallback_selection(key, segment_records))
             continue

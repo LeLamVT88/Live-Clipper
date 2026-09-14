@@ -4,9 +4,13 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from .common import LineupResolutionError
+from .common import (
+    LineupResolutionError,
+    detections_before_substitutes_by_scene,
+    detections_without_substitute_panel_by_scene,
+)
 from .formation import attempt_formation_resolution
-from .layout import formation_refinement_frames
+from .layout import formation_recovery_windows, formation_refinement_frames
 from .local_models import create_local_number_recognizer, create_local_table_ocr
 from .player_names import enrich_player_names
 from .refinement import refine_formation_numbers, refine_table_numbers
@@ -42,13 +46,18 @@ def resolve_table(
     expected_lineups: int, max_gap_seconds: float, signature_threshold: float,
     models: LocalOCRModels, messages: list[str],
 ) -> tuple[ResolutionResult, pd.DataFrame]:
+    table_segment = (
+        detections_before_substitutes_by_scene(segment)
+        if expected_lineups > 1
+        else segment
+    )
     table_records, table_count = resolve_table_events(
-        segment, expected_players, max_gap_seconds, signature_threshold
+        table_segment, expected_players, max_gap_seconds, signature_threshold
     )
     expected_total = expected_players * expected_lineups
     if len(table_records) == expected_total:
         messages.append("Complete repeated table/list consensus.")
-        return ResolutionResult(table_records, "table"), segment
+        return ResolutionResult(table_records, "table"), table_segment
     if table_records or table_count:
         messages.append(
             f"table/list pass resolved {len(table_records) // expected_players}/"
@@ -61,7 +70,7 @@ def resolve_table(
         return ResolutionResult([]), segment
     try:
         refined, added_count = refine_table_numbers(
-            segment, models.get_table_ocr("table-number"), expected_players
+            table_segment, models.get_table_ocr("table-number"), expected_players
         )
         if not added_count:
             return ResolutionResult([]), segment
@@ -73,7 +82,7 @@ def resolve_table(
             for record in table_records:
                 record["resolution_method"] = "table+local_ocr"
             return ResolutionResult(table_records, "table+local_ocr"), refined
-        return ResolutionResult([]), refined
+        return ResolutionResult([]), segment
     except LOCAL_OCR_ERRORS as exc:
         messages.append(f"local table OCR unavailable: {exc}")
         return ResolutionResult([]), segment
@@ -105,7 +114,13 @@ def resolve_formation(
     segment: pd.DataFrame, *, expected_players: int, min_number_count: int,
     max_gap_seconds: float, signature_threshold: float, enable_local_ocr: bool,
     models: LocalOCRModels, messages: list[str], expected_lineups: int = 1,
+    enable_failed_recovery: bool = False,
 ) -> ResolutionResult:
+    formation_segment = (
+        detections_without_substitute_panel_by_scene(segment)
+        if expected_lineups > 1
+        else segment
+    )
     resolution_args = {
         "expected_players": expected_players,
         "min_number_count": min_number_count,
@@ -113,7 +128,7 @@ def resolve_formation(
         "signature_threshold": signature_threshold,
     }
     _, initial_events, initial_records, initial_errors = attempt_formation_resolution(
-        segment, **resolution_args
+        formation_segment, **resolution_args
     )
     if (
         initial_events
@@ -122,9 +137,12 @@ def resolve_formation(
     ):
         return ResolutionResult(initial_records, "formation")
     refined = refine_formation(
-        segment, enable_local_ocr=enable_local_ocr, models=models, messages=messages
+        formation_segment,
+        enable_local_ocr=enable_local_ocr,
+        models=models,
+        messages=messages,
     )
-    if refined is segment:
+    if refined is formation_segment:
         events = initial_events
         records = initial_records
         event_errors = initial_errors
@@ -132,7 +150,6 @@ def resolve_formation(
         _, events, records, event_errors = attempt_formation_resolution(refined, **resolution_args)
     if not events:
         messages.append("no formation snapshot found")
-        return ResolutionResult([])
     refined_locally = any(msg.startswith("local formation OCR added") for msg in messages)
     method = "formation+local_ocr" if refined_locally else "formation"
     for record in records:
@@ -140,6 +157,60 @@ def resolve_formation(
     messages.extend(
         (f"ignored incomplete formation candidate: {error}" if records else error)
         for error in event_errors
+    )
+    if records or not enable_failed_recovery or not enable_local_ocr:
+        return ResolutionResult(records, method if records else "")
+    if expected_lineups != 1 or "frame_path" not in segment.columns:
+        return ResolutionResult([])
+    windows = formation_recovery_windows(segment, expected_players)
+    if not windows:
+        messages.append("stable name-based formation recovery found no eligible window")
+        return ResolutionResult([])
+    recovery_errors: list[str] = []
+    for position, window in enumerate(windows, start=1):
+        frame_indices = [frame_index for frame_index, _ in window]
+        window_segment = segment[segment["frame_index"].isin(frame_indices)].copy()
+        try:
+            recovered, added_count = refine_formation_numbers(
+                window_segment,
+                ocr=models.get_table_ocr("stable-formation-number"),
+                recognizer=models.get_number_recognizer(),
+                chosen_frames=window,
+                recover_all_names=True,
+            )
+            if not added_count:
+                recovery_errors.append(f"window {position} added no number observations")
+                continue
+            _, _, recovered_records, errors = attempt_formation_resolution(
+                recovered, **resolution_args
+            )
+            if len(recovered_records) != expected_players:
+                detail = errors[-1] if errors else (
+                    f"resolved {len(recovered_records)}/{expected_players} players"
+                )
+                recovery_errors.append(f"window {position}: {detail}")
+                continue
+            for record in recovered_records:
+                record["resolution_method"] = "formation+stable_name_recovery"
+            timestamps = [
+                float(window_segment[window_segment["frame_index"] == frame_index][
+                    "timestamp_seconds"
+                ].iloc[0])
+                for frame_index in frame_indices
+            ]
+            messages.append(
+                f"stable name-based formation recovery resolved {expected_players} "
+                "players from "
+                f"window {min(timestamps):.1f}-{max(timestamps):.1f}s; "
+                f"added {added_count} number observations"
+            )
+            return ResolutionResult(
+                recovered_records, "formation+stable_name_recovery"
+            )
+        except LOCAL_OCR_ERRORS as exc:
+            recovery_errors.append(f"window {position}: {exc}")
+    messages.append(
+        "stable name-based formation recovery failed: " + "; ".join(recovery_errors)
     )
     return ResolutionResult(records, method if records else "")
 
@@ -153,6 +224,7 @@ def resolve_all_lineups(
     enable_local_ocr: bool = True,
     reference_detections: pd.DataFrame | None = None,
     expected_lineups: int = 1,
+    enable_failed_formation_recovery: bool = False,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     records: list[dict[str, object]] = []
     diagnostics: list[dict[str, object]] = []
@@ -172,6 +244,7 @@ def resolve_all_lineups(
                 max_gap_seconds=max_gap_seconds, signature_threshold=signature_threshold,
                 enable_local_ocr=enable_local_ocr, models=models, messages=messages,
                 expected_lineups=expected_lineups,
+                enable_failed_recovery=enable_failed_formation_recovery,
             )
         for record in result.records:
             record.setdefault(

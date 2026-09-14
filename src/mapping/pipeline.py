@@ -98,6 +98,7 @@ def _resolve(
     keys: list[SegmentKey], detections: GroupedRecords, config: PipelineConfig,
     reference_detections: GroupedRecords | None = None,
     expected_lineups: int = 1,
+    enable_failed_formation_recovery: bool = False,
 ) -> tuple[GroupedRecords, DiagnosticMap]:
     flat = [row for key in keys for row in detections[key]]
     try:
@@ -113,6 +114,7 @@ def _resolve(
                 for row in (reference_detections or {}).get(key, [])
             ),
             expected_lineups=expected_lineups,
+            enable_failed_formation_recovery=enable_failed_formation_recovery,
         )
     except LineupResolutionError as exc:
         resolved = []
@@ -137,6 +139,7 @@ def perform_attempt(
     previous_detections: GroupedRecords, ocr: object, config: PipelineConfig,
     reference_detections: GroupedRecords | None = None,
     expected_lineups: int = 1,
+    enable_failed_formation_recovery: bool = False,
 ) -> AttemptOutcome:
     targets = _for_keys(target_records, keys)
     new_records: RecordList = []
@@ -160,7 +163,8 @@ def perform_attempt(
     fresh = group_records_by_segment(new_detections)
     detections = {key: reused[key] + fresh.get(key, []) for key in keys}
     resolved, diagnostics = _resolve(
-        keys, detections, config, reference_detections, expected_lineups
+        keys, detections, config, reference_detections, expected_lineups,
+        enable_failed_formation_recovery=enable_failed_formation_recovery,
     )
     quality: dict[SegmentKey, QualityResult] = {}
     attempt_rows: RecordList = []
@@ -299,10 +303,14 @@ class LineupWorkflow:
         selections = {key: fallback_selection(key, rows, message)
                       for key, rows in grouped.items()}
         ordered = [key for key in self._state().ordered_keys if key in keys]
-        outcome = self._attempt(ordered, 3, "tier3_full_2fps", _full_records(source))
+        outcome = self._attempt(
+            ordered, 3, "tier3_full_2fps", _full_records(source),
+            enable_failed_formation_recovery=True,
+        )
         self._state().apply(outcome, selections, final=True)
     def _attempt(
-        self, keys: list[SegmentKey], attempt: int, tier: str, frames: RecordList
+        self, keys: list[SegmentKey], attempt: int, tier: str, frames: RecordList,
+        enable_failed_formation_recovery: bool = False,
     ) -> AttemptOutcome:
         state = self._state()
         if self.ocr is None:
@@ -320,6 +328,7 @@ class LineupWorkflow:
                 len(state.ordered_keys), self.config.lineups_per_match
             ),
             ocr=self.ocr, config=self.config,
+            enable_failed_formation_recovery=enable_failed_formation_recovery,
         )
     def _finalize_match(self) -> QualityResult:
         state = self._state()
@@ -327,7 +336,10 @@ class LineupWorkflow:
         selected, quality = select_match_lineups(
             records, self.config.lineups_per_match, self.config.players_per_lineup
         )
-        state.final_records = group_records_by_segment(selected) if quality.passed else {}
+        # A match-level completeness failure must not erase lineups that already
+        # passed their segment quality gate. Keep the partial result exportable
+        # while preserving the failed match status and exit code.
+        state.final_records = group_records_by_segment(selected)
         state.match_quality = quality
         return quality
     def _write_outputs(self) -> None:
@@ -375,7 +387,7 @@ class LineupWorkflow:
                 str(diagnostic.get("message", "")).strip(), quality_message, match_message,
             ) if part
         )
-        passed = quality.passed and bool(match_quality and match_quality.passed)
+        passed = quality.passed
         return {
             "video": key[0], "segment_index": key[1],
             "status": "resolved" if passed else "unresolved",

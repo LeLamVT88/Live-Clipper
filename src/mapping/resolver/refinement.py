@@ -14,6 +14,7 @@ from .layout import (
     formation_name_rows,
     formation_number_gap,
     formation_refinement_frames,
+    recovery_formation_name_rows,
 )
 from .local_models import (
     PIXEL_GEOMETRY_COLUMNS,
@@ -32,9 +33,11 @@ from .table import table_pair_observations, table_rows_for_frame
 
 def refine_formation_numbers(
     segment: pd.DataFrame, ocr: object, recognizer: object | None = None,
+    chosen_frames: list[tuple[int, list[tuple[pd.Series, pd.Series]]]] | None = None,
+    recover_all_names: bool = False,
 ) -> tuple[pd.DataFrame, int]:
     formation_segment = detections_without_substitute_panel(segment)
-    chosen = formation_refinement_frames(formation_segment)
+    chosen = chosen_frames or formation_refinement_frames(formation_segment)
     if not chosen or "frame_path" not in segment.columns:
         return segment, 0
     cv2 = require_cv2("formation")
@@ -46,7 +49,11 @@ def refine_formation_numbers(
         if image is None:
             continue
         height, width = image.shape[:2]
-        name_rows = formation_name_rows(frame, anchors)
+        name_rows = (
+            recovery_formation_name_rows(frame)
+            if recover_all_names
+            else formation_name_rows(frame, anchors)
+        )
         if not name_rows:
             continue
         number_gap = formation_number_gap(anchors)

@@ -1,5 +1,6 @@
 from .common import (FormationEvent, LineupResolutionError, PairObservation,
-                     detections_without_substitute_panel, is_name_like)
+                     detections_without_substitute_panel, is_name_like,
+                     split_presentation_scenes)
 from .formation import attempt_formation_resolution, validate_unique_shirt_numbers
 from .layout import formation_anchor_pairs, formation_name_rows, formation_number_gap
 from .local_models import numeric_candidate_consensus

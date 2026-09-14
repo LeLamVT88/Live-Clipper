@@ -184,7 +184,8 @@ class QualityGateTests(unittest.TestCase):
 
         selected, quality = select_match_lineups(first + duplicate, 2, 11)
 
-        self.assertEqual(selected, [])
+        self.assertEqual(len(selected), 11)
+        self.assertEqual({row["lineup_index"] for row in selected}, {1})
         self.assertFalse(quality.passed)
         self.assertIn("1/2 distinct", quality.message)
 
@@ -297,6 +298,32 @@ class AdaptiveFallbackTests(unittest.TestCase):
             state.final_tier[passed_key],
             "tier1_selected_3",
         )
+
+    def test_match_failure_keeps_valid_lineup_for_output(self) -> None:
+        key = ("match.mp4", 1)
+        runner = LineupWorkflow(
+            SimpleNamespace(lineups_per_match=2, players_per_lineup=11)
+        )
+        runner.state = WorkflowState([key])
+        runner.state.final_records = {key: resolved_players()}
+        runner.state.final_quality = {key: QualityResult(True, 11, "passed")}
+        runner.state.final_tier = {key: "tier1_selected_3"}
+        runner.state.final_diagnostics = {
+            key: {
+                "status": "resolved",
+                "resolution_method": "formation",
+                "message": "",
+            }
+        }
+
+        match_quality = runner._finalize_match()
+        diagnostic = runner._final_diagnostic(key)
+
+        self.assertFalse(match_quality.passed)
+        self.assertEqual(len(runner.state.final_records[key]), 11)
+        self.assertEqual(diagnostic["status"], "resolved")
+        self.assertEqual(diagnostic["resolution_method"], "formation")
+        self.assertIn("match quality gate failed", diagnostic["message"])
 
     def test_failed_attempt_keeps_selection_for_final_diagnostics(self) -> None:
         key = ("match.mp4", 1)
@@ -503,6 +530,10 @@ class AdaptiveFallbackTests(unittest.TestCase):
         self.assertEqual(
             [len(call.kwargs["target_records"]) for call in perform.call_args_list],
             [3, 7, 8],
+        )
+        self.assertEqual(
+            [call.kwargs["enable_failed_formation_recovery"] for call in perform.call_args_list],
+            [False, False, True],
         )
 
 

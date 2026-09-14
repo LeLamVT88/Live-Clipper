@@ -119,6 +119,42 @@ class ScoutSamplingTests(unittest.TestCase):
 
 
 class SegmentSelectionTests(unittest.TestCase):
+    def test_substitutes_panel_does_not_leak_into_the_next_team_scene(self) -> None:
+        timestamps = [0.0, 2.0, 4.0, 6.0, 8.0, 10.0]
+        records = [
+            frame_record(index, timestamp)
+            for index, timestamp in enumerate(timestamps, start=1)
+        ]
+        rows = []
+        for team, frame_indices in (("HOME", (1, 2)), ("AWAY", (5, 6))):
+            for frame_index in frame_indices:
+                for number in range(1, 7):
+                    rows.append(detection(
+                        frame_index=frame_index,
+                        timestamp_seconds=timestamps[frame_index - 1],
+                        text=f"{number} {team} PLAYER {number}",
+                        text_type="text",
+                        x=0.15,
+                        y=0.10 + number * 0.10,
+                    ))
+        rows.extend([
+            detection(frame_index=3, timestamp_seconds=4.0, text="SUBSTITUTES",
+                      text_type="text", x=0.15, y=0.10),
+            detection(frame_index=4, timestamp_seconds=6.0, text="LIVE",
+                      text_type="text", x=0.90, y=0.10),
+        ])
+
+        selections = selector.select_segment_frames(
+            records,
+            pd.DataFrame(rows),
+            selected_frame_count=1,
+            scout_fps=0.5,
+            expected_lineups=2,
+        )
+
+        self.assertEqual(selections[0].layout, "multiple_lineups")
+        self.assertEqual(selections[0].selected_frame_indices, (2, 6))
+
     def test_one_clip_selects_frames_from_two_stable_scenes(self) -> None:
         timestamps = [0.0, 2.0, 4.0, 12.0, 14.0, 16.0]
         records = [
