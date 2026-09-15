@@ -98,6 +98,12 @@ class FullPipelineTests(unittest.TestCase):
             video = root / "match.mp4"
             video.write_bytes(b"video")
             output_dir = root / "result"
+            clips_dir = output_dir / "clips"
+            clips_dir.mkdir(parents=True)
+            stale_clip = clips_dir / "match_lineup_2.mp4"
+            stale_clip.write_bytes(b"stale false positive")
+            unrelated_clip = clips_dir / "other_lineup_1.mp4"
+            unrelated_clip.write_bytes(b"unrelated")
             with (
                 patch(
                     "line_up.cli.detect_lineups",
@@ -111,6 +117,8 @@ class FullPipelineTests(unittest.TestCase):
             rows = json.loads((output_dir / "players.json").read_text(encoding="utf-8"))
             self.assertEqual(status, 0)
             self.assertTrue((output_dir / "clips" / "match_lineup_1.mp4").is_file())
+            self.assertFalse(stale_clip.exists())
+            self.assertTrue(unrelated_clip.is_file())
             self.assertEqual(
                 rows,
                 [{

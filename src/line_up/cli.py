@@ -168,13 +168,21 @@ def run_full_pipeline(
 
     with detection_json.open("w", encoding="utf-8") as destination:
         json.dump(output, destination, indent=2, ensure_ascii=False)
+
+    # A rerun can find fewer intervals than an earlier run. Remove only clips
+    # generated for this source video so stale false positives are not left in
+    # the result directory.
+    clips_dir.mkdir(parents=True, exist_ok=True)
+    clip_prefix = f"{safe_stem(video_path.stem)}_lineup_"
+    for stale_clip in clips_dir.glob(f"{clip_prefix}*.mp4"):
+        stale_clip.unlink()
+
     if not result.lineups:
         write_players_json(None, players_json)
         remove_legacy_players_csv(output_dir)
         print(f"No lineup interval found. Detection details: {detection_json}")
         return 2
 
-    clips_dir.mkdir(parents=True, exist_ok=True)
     print(f"\nExporting {len(result.lineups)} clip(s) to: {clips_dir}")
     clips: list[Path] = []
     for index, lineup in enumerate(result.lineups, 1):

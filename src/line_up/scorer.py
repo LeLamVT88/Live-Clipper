@@ -49,7 +49,6 @@ LINEUP_KEYWORDS = (
     "starting 11",
     "substitutes",
     "formation",
-    "coach",
     "doi hinh",
     "xuat phat",
     "titulares",

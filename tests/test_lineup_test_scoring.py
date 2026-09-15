@@ -52,6 +52,53 @@ class LineupScoringTests(unittest.TestCase):
         self.assertEqual(score, 0.0)
         self.assertEqual(details["names"], 0)
 
+    def test_head_coach_lower_thirds_are_not_lineups(self) -> None:
+        examples = (
+            ["TSN1", "MOHAMED OUAHBI", "POWER", "HEAD COACH", "ADE"],
+            ["WORLD", "202", "2FOX", "LIVE KANSAS CITY", "ECUR", "0702",
+             "FIFA", "LIONEL SCALONI", "HEAD COACH"],
+        )
+
+        for texts in examples:
+            with self.subTest(texts=texts):
+                score, details = compute_lineup_score(
+                    texts, [0.99] * len(texts), len(texts)
+                )
+
+                self.assertLess(score, 0.45)
+                self.assertFalse(details["keyword"])
+                self.assertFalse(details["strong_evidence"])
+
+    def test_head_coach_does_not_override_active_match_clock(self) -> None:
+        texts = [
+            "itv", "URU 0 0 ESP 03:16", "SPORT", "MARCELO BIELSA", "HEAD COACH",
+        ]
+
+        score, details = compute_lineup_score(
+            texts, [0.99] * len(texts), len(texts)
+        )
+
+        self.assertEqual(score, 0.0)
+        self.assertTrue(details["suppressed"])
+        self.assertEqual(details["reason"], "Active match clock detected (gameplay / scoreboard)")
+
+    def test_full_lineup_with_head_coach_text_still_passes(self) -> None:
+        texts = [
+            "CANADA", "4-4-2", "16 MAXIME CREPEAU", "22 RICHIE LARYEA",
+            "4 LUC DE FOUGEROLLES", "15 MOISE BOMBITO", "2 ALISTAIR JOHNSTON",
+            "20 ALI AHMED", "7 STEPHEN EUSTAQUIO", "23 NIKO SIGUR",
+            "17 TAJON BUCHANAN", "12 TANI OLUWASEYI", "10 JONATHAN DAVID",
+            "JESSE MARSCH", "HEAD COACH",
+        ]
+
+        score, details = compute_lineup_score(
+            texts, [0.99] * len(texts), len(texts)
+        )
+
+        self.assertGreaterEqual(score, 0.45)
+        self.assertTrue(details["formation"])
+        self.assertTrue(details["strong_evidence"])
+
 
 class LineupProposalTests(unittest.TestCase):
     def test_single_false_positive_cannot_create_a_proposal(self) -> None:
